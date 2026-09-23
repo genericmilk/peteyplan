@@ -1,0 +1,26 @@
+name: peteyplan
+
+services:
+  peteyplan:
+    build: .
+    image: peteyplan:latest
+    container_name: peteyplan
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATA_DIR: /data
+    volumes:
+      # SQLite database lives here — survives rebuilds / restarts.
+      - peteyplan-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/board').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  peteyplan-data:

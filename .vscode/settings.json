@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "peteyplan": {
+        "command": "node",
+        "args": ["mcp-server.js"],
+        "env": {
+          "PETEYPLAN_API_URL": "http://localhost:3000"
+        }
+      }
+    }
+  }
+}

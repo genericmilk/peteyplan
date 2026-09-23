@@ -1,0 +1,36 @@
+{
+  "name": "peteyplan",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PeteyPlan: a Docker-based Kanban board built with Nuxt and SQLite",
+  "type": "module",
+  "author": {
+    "name": "Peter Day",
+    "email": "peter.day@experian.com"
+  },
+  "scripts": {
+    "dev": "nuxi dev",
+    "build": "nuxi build",
+    "preview": "nuxi preview",
+    "postinstall": "nuxt prepare"
+  },
+  "engines": {
+    "node": "^22.19.0 || ^24.11.0 || >=26.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "better-sqlite3": "^13.0.3",
+    "nuxt": "^4.5.2",
+    "vue": "^3.5.0",
+    "vue-router": "^4.5.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "typescript": "^5.7.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.3": true,
+    "esbuild@0.28.2": true
+  }
+}
