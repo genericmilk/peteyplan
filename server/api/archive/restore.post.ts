@@ -1,4 +1,4 @@
-import { restoreCard } from '../../db'
+import { cardRef, resolveCardId, restoreCard } from '../../db'
 
 export default defineEventHandler(async (event) => {
   const body = await readBody<{ cardId?: unknown; columnId?: unknown }>(event)
@@ -9,7 +9,7 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'cardId is required' })
   }
 
-  const card = restoreCard(cardId, columnId)
+  const card = restoreCard(resolveCardId(cardId), columnId)
   if (!card) {
     throw createError({
       statusCode: 404,
@@ -18,6 +18,8 @@ export default defineEventHandler(async (event) => {
   }
   return {
     id: card.id,
+    number: card.number,
+    ref: cardRef(card.number ?? 0),
     title: card.title,
     description: card.description,
     jiraKey: card.jira_key,

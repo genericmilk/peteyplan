@@ -1,4 +1,4 @@
-import { addCard } from '../db'
+import { addCard, cardRef } from '../db'
 import { normalizeDueBy } from '../utils/due'
 import { normalizeJiraKey } from '../utils/jira'
 import { DEFAULT_KIND, DEFAULT_PROGRESS, normalizeKind, normalizeProgress } from '../utils/progress'
@@ -33,6 +33,8 @@ export default defineEventHandler(async (event) => {
   }
   return {
     id: card.id,
+    number: card.number,
+    ref: cardRef(card.number ?? 0),
     title: card.title,
     description: card.description,
     jiraKey: card.jira_key,

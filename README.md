@@ -7,6 +7,7 @@ This replaced an earlier Electron app; that source is kept only locally (not in 
 ## Features
 
 - Columns and cards with drag-and-drop reordering
+- Cards carry a stable number shown as `PP-n` (e.g. `PP-12`); refs work in the API and MCP tools anywhere a card ID does
 - Optional card **description**, **Jira key**, and **due date**
 - Work **kind** (development / chore / managing) with kind-specific progress stages
 - Due dates auto-rank cards (sooner dues nearer the top)
@@ -69,11 +70,11 @@ npm run preview
 | Local | `DATA_DIR` defaults to `./data` |
 
 **Nothing under `data/` or any `*.db` / `*.sqlite*` file is committed.** A clone + fresh Docker (or local) start always gets a new DB and the default seeded columns.
-
 Schema (simplified):
 
 - `columns(id, title, position)`
-- `cards(id, column_id, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at)`
+- `cards(id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at)`
+- `card_counter(id, next)` — monotonic allocator for card numbers (`PP-n` refs never reuse deleted numbers)
 
 Jira keys (and pasted Atlassian browse URLs) deep-link to `https://kycglobal.atlassian.net/browse/<KEY>`. Keys mentioned in the title or description are also auto-linked.
 
@@ -118,9 +119,9 @@ Add an MCP server entry pointing at `node mcp-server.js` with `PETEYPLAN_API_URL
 | DELETE | `/api/columns/:id/cards` | — (soft-archive all cards in column) |
 | POST | `/api/columns/reorder` | `{ orderedIds: string[] }` |
 | POST | `/api/cards` | `{ columnId, title, description?, jiraKey?, dueBy?, kind?, progress? }` |
-| PATCH | `/api/cards/:id` | `{ title?, description?, jiraKey?, dueBy?, kind?, progress? }` |
-| DELETE | `/api/cards/:id` | — (soft-archive) |
-| POST | `/api/cards/reorder` | `{ columnId, orderedIds: string[] }` |
+| PATCH | `/api/cards/:id` | `{ title?, description?, jiraKey?, dueBy?, kind?, progress? }` — `:id` accepts a card ID or `PP-n` ref |
+| DELETE | `/api/cards/:id` | — (soft-archive; `:id` accepts a card ID or `PP-n` ref) |
+| POST | `/api/cards/reorder` | `{ columnId, orderedIds: string[] }` — ids accept card IDs or `PP-n` refs |
 
 ## Project layout
 

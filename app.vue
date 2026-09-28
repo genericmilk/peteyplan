@@ -16,6 +16,8 @@ import {
 
 interface Card {
   id: string
+  number: number
+  ref: string
   title: string
   description: string
   jiraKey?: string
@@ -27,6 +29,8 @@ interface Column { id: string; title: string; cards: Card[] }
 interface Board { columns: Column[] }
 interface ArchivedCard {
   id: string
+  number: number
+  ref: string
   title: string
   description: string
   jiraKey: string
@@ -111,6 +115,167 @@ function linkifyJira(text: string): TextPart[] {
   if (last < text.length) parts.push({ type: 'text', value: text.slice(last) })
   return parts.length ? parts : [{ type: 'text', value: text }]
 }
+/* ── Markdown descriptions (read-only views) ──────────────────────────────── */
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+const MD_SLOT_RE = /(\u0000\d+\u0000)/g
+
+function mdSlot(slots: string[], html: string): string {
+  slots.push(html)
+  return `\u0000${slots.length - 1}\u0000`
+}
+
+/** Inline spans (bold, italic, strike) + Jira keys on escaped text; slots stay opaque. */
+function renderDescInline(s: string, slots: string[], links = true): string {
+  s = s.replace(/\*\*\*([^*<>\n]+)\*\*\*/g, '<strong><em>$1</em></strong>')
+  s = s.replace(/\*\*([^*<>\n]+)\*\*/g, '<strong>$1</strong>')
+  s = s.replace(/__([^_<>\n]+)__/g, '<strong>$1</strong>')
+  // Single-char emphasis needs non-word chars on both sides (2*3*4, foo_bar,
+  // 5 * 3 stay literal). Escaped entities (&quot; …) are non-word, so no
+  // special-casing needed. Lookahead keeps trailing punctuation unconsumed.
+  s = s.replace(/(^|[^\w*])\*([^*<>\n]+)\*(?=[^\w*]|$)/g, '$1<em>$2</em>')
+  s = s.replace(/(^|[^\w_])_([^_<>\n]+)_(?=[^\w_]|$)/g, '$1<em>$2</em>')
+  s = s.replace(/~~([^~<>\n]+)~~/g, '<del>$1</del>')
+  // links=false (link text): jira pass skipped, no nested anchors.
+  // Slot segments always pass through untouched either way.
+  if (links) {
+    const jira = new RegExp(`${JIRA_URL_RE.source}|${JIRA_KEY_RE.source}`, 'gi')
+    s = s
+      .split(MD_SLOT_RE)
+      .map((seg, i) =>
+        i % 2 === 1
+          ? seg
+          : seg.replace(jira, (m: string, fromUrl?: string, bare?: string) => {
+              const key = (fromUrl || bare || m).toUpperCase()
+              return mdSlot(
+                slots,
+                `<a class="jira-link" href="${jiraBrowseUrl(key)}" target="_blank" rel="noopener noreferrer">${key}</a>`
+              )
+            })
+      )
+      .join('')
+  }
+  return s.replace(/\n/g, '<br>')
+}
+/** Render description markdown to safe HTML (all user text escaped first). */
+function renderDescHtml(input: string): string {
+  if (!input) return ''
+  const slots: string[] = []
+  // Peel trailing punctuation off an HTML-escaped URL match. Entities
+  // (&quot; &gt; …) peel first — otherwise the ';' would be eaten as punctuation.
+  // A ')' only peels when it unbalances the URL's own parens.
+  const trimUrlTail = (raw: string): [string, string] => {
+    let url = raw
+    let trail = ''
+    for (;;) {
+      const ent = url.match(/&(quot|#39|gt|lt|amp);$/)
+      if (ent) {
+        trail = ent[0] + trail
+        url = url.slice(0, -ent[0].length)
+        continue
+      }
+      const ch = url.match(/[.,;:!?)\]}'"]$/)
+      if (!ch) break
+      // Balanced parens: keep the ')' that closes a '(' inside the URL.
+      if (ch[0] === ')') {
+        const open = (url.match(/\(/g) ?? []).length
+        const close = (url.match(/\)/g) ?? []).length
+        if (close <= open) break
+      }
+      trail = ch[0] + trail
+      url = url.slice(0, -1)
+    }
+    return [url, trail]
+  }
+  const inline = (t: string) => renderDescInline(t, slots)
+  let s = escapeHtml(input)
+  // Fenced code blocks: opener/closer must be full lines (```info … ```).
+  // Mid-line ``` stays inline code. Padded with blank lines so the slot
+  // always forms its own block (<pre> inside <p> is invalid).
+  // (?![\s\S]) is absolute end-of-input ($ matches at every line end here).
+  s = s.replace(/^[ ]{0,3}```[^`\n]*\n([\s\S]*?)(?:^[ ]{0,3}```[ \t]*$|(?![\s\S]))/gm, (_m: string, code: string) =>
+    `\n\n${mdSlot(slots, `<pre class="md-pre"><code>${code.replace(/^\n+|\n+$/g, '')}</code></pre>`)}\n\n`
+  )
+  // Inline code (matching backtick runs: `x`, ``x``, ```x```).
+  s = s.replace(/(`{1,3})([^`\n]+?)\1/g, (_m: string, _ticks: string, code: string) =>
+    mdSlot(slots, `<code class="md-code">${code}</code>`)
+  )
+  // Explicit links [text](https://…); other schemes left literal. Link text gets
+  // inline spans (no nested links); trailing URL punctuation stays outside.
+  // Inner code slots resolve before the outer slot (final pass is single-level).
+  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s<]+)\)/g, (_m: string, text: string, rawUrl: string) => {
+    const [url, trail] = trimUrlTail(rawUrl)
+    if (!url) return _m
+    const inner = renderDescInline(text, slots, false)
+      .split(MD_SLOT_RE)
+      .map((seg, i) => (i % 2 === 1 ? slots[Number(seg.slice(1, -1))] ?? '' : seg))
+      .join('')
+    return mdSlot(slots, `<a class="md-link" href="${url}" target="_blank" rel="noopener noreferrer">${inner}</a>`) + trail
+  })
+  // Jira browse URLs keep the existing key-style link.
+  s = s.replace(JIRA_URL_RE, (m: string, key?: string) =>
+    mdSlot(
+      slots,
+      `<a class="jira-link" href="${jiraBrowseUrl((key || m).toUpperCase())}" target="_blank" rel="noopener noreferrer">${(key || m).toUpperCase()}</a>`
+    )
+  )
+  // Bare URLs (explicit links + Jira URLs already slotted; split keeps slots opaque).
+  // url stays HTML-escaped: correct in both href and display.
+  s = s
+    .split(MD_SLOT_RE)
+    .map((seg, i) =>
+      i % 2 === 1
+        ? seg
+        : seg.replace(/https?:\/\/[^\s<]+/g, (m: string) => {
+            const [url, trail] = trimUrlTail(m)
+            if (!url) return m
+            return mdSlot(slots, `<a class="md-link" href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`) + trail
+          })
+    )
+    .join('')
+  const html = s
+    .split(/\n{2,}/)
+    .filter((block) => block.trim() !== '')
+    .map((block) => {
+      // Slot-only blocks (fenced code) render unwrapped: <pre> inside <p> is invalid.
+      const solo = block.trim().match(/^\u0000(\d+)\u0000$/)
+      if (solo && slots[Number(solo[1])]?.startsWith('<pre')) return block.trim()
+      const lines = block.split('\n')
+      const heading = lines[0].trim().match(/^(#{1,6})\s+(.*?)\s*$/)
+      if (heading && heading[2]) {
+        const rest = lines.slice(1).join('\n').trim()
+        return (
+          `<div class="md-h md-h${heading[1].length}">${inline(heading[2])}</div>` +
+          (rest ? `<p class="md-p">${inline(rest)}</p>` : '')
+        )
+      }
+      if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(block)) return '<hr class="md-hr">'
+      if (lines.every((l) => /^\s*&gt;/.test(l))) {
+        return `<blockquote class="md-quote">${inline(lines.map((l) => l.replace(/^\s*&gt;\s?/, '')).join('\n'))}</blockquote>`
+      }
+      const ul = lines.every((l) => /^\s*[-*•]\s+\S/.test(l))
+      const ol = lines.every((l) => /^\s*\d{1,9}[.)]\s+\S/.test(l))
+      if (ul || ol) {
+        const items = lines.map((l) => inline(l.replace(/^\s*(?:[-*•]|\d{1,9}[.)])\s+/, '')))
+        const lis = items.map((item) => `<li>${item}</li>`).join('')
+        return ul ? `<ul class="md-list">${lis}</ul>` : `<ol class="md-olist">${lis}</ol>`
+      }
+      return `<p class="md-p">${inline(block)}</p>`
+    })
+    .join('')
+  return html
+    .split(MD_SLOT_RE)
+    .map((seg, i) => (i % 2 === 1 ? slots[Number(seg.slice(1, -1))] ?? '' : seg))
+    .join('')
+}
 
 /* ── State ─────────────────────────────────────────────────────────────────── */
 
@@ -127,6 +292,7 @@ function cardMatchesQuery(card: Card, q: string): boolean {
   const hay = [
     card.title,
     card.description,
+    card.ref ?? '',
     card.jiraKey ?? '',
     card.dueBy ?? '',
     card.kind ?? '',
@@ -589,8 +755,8 @@ const cardProgressStage = ref<ProgressId>(DEFAULT_PROGRESS)
 const cardDeleteVisible = ref(false)
 const cardDialogColumnId = ref<string | null>(null)
 const cardDialogCardId = ref<string | null>(null)
+const cardDialogRef = ref('')
 const descEditing = ref(false)
-let descBlurTimer: ReturnType<typeof setTimeout> | null = null
 
 const dialogStages = computed(() => stagesForKind(cardKindId.value))
 
@@ -603,10 +769,6 @@ function onDialogKindChange() {
 }
 
 function startDescEdit() {
-  if (descBlurTimer) {
-    clearTimeout(descBlurTimer)
-    descBlurTimer = null
-  }
   descEditing.value = true
   nextTick(() => {
     const el = cardDescTextarea.value
@@ -617,13 +779,21 @@ function startDescEdit() {
   })
 }
 
-function onDescBlur() {
-  // Delay so dialog action clicks (Save/Cancel) are not lost when the
-  // textarea unmounts on blur.
-  descBlurTimer = setTimeout(() => {
-    descEditing.value = false
-    descBlurTimer = null
-  }, 120)
+/** Open the card dialog unless the click landed on a rendered link. */
+function openCardUnlessLink(event: MouseEvent, columnId: string, cardId: string) {
+  if ((event.target as HTMLElement | null)?.closest?.('a')) return
+  openCardDialog(columnId, cardId)
+}
+
+/** Clicks on rendered links open the link; clicks elsewhere start editing. */
+function onDescViewClick(event: MouseEvent) {
+  if ((event.target as HTMLElement | null)?.closest?.('a')) return
+  startDescEdit()
+}
+/** Keyboard activation mirrors click: links keep native behavior. */
+function onDescViewKeydown(event: KeyboardEvent) {
+  if ((event.target as HTMLElement | null)?.closest?.('a')) return
+  startDescEdit()
 }
 
 function openCardDialog(columnId: string, cardId: string | null) {
@@ -633,16 +803,17 @@ function openCardDialog(columnId: string, cardId: string | null) {
     const card = findColumn(columnId)?.cards.find((c) => c.id === cardId)
     if (!card) return
     cardDialogTitle.value = 'Edit card'
+    cardDialogRef.value = card.ref || ''
     cardTitle.value = card.title
     cardDesc.value = card.description || ''
     cardJiraKey.value = card.jiraKey || ''
-    cardDueBy.value = card.dueBy || ''
     cardKindId.value = normalizeKind(card.kind)
     cardProgressStage.value = normalizeProgress(card.progress, cardKindId.value)
     cardDeleteVisible.value = true
     descEditing.value = false
   } else {
     cardDialogTitle.value = 'New card'
+    cardDialogRef.value = ''
     cardTitle.value = ''
     cardDesc.value = ''
     cardJiraKey.value = ''
@@ -985,11 +1156,12 @@ onBeforeUnmount(() => {
             :class="{ dragging: draggingId === card.id }"
             :data-id="card.id"
             :draggable="!isSearching"
-            @click="openCardDialog(col.id, card.id)"
+            @click="openCardUnlessLink($event, col.id, card.id)"
             @dragstart="onCardDragStart($event, col.id, card)"
             @dragend="onCardDragEnd"
           >
             <div class="card-meta">
+              <span v-if="card.ref" class="card-ref" :title="'Card ' + card.ref">{{ card.ref }}</span>
               <a
                 v-if="card.jiraKey"
                 class="card-jira"
@@ -1019,19 +1191,7 @@ onBeforeUnmount(() => {
                 <template v-else>{{ part.value }}</template>
               </template>
             </div>
-            <div v-if="card.description" class="card-desc">
-              <template v-for="(part, i) in linkifyJira(card.description)" :key="'d' + i">
-                <a
-                  v-if="part.type === 'jira'"
-                  class="jira-link"
-                  :href="jiraBrowseUrl(part.key)"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  @click.stop
-                >{{ part.key }}</a>
-                <template v-else>{{ part.value }}</template>
-              </template>
-            </div>
+            <div v-if="card.description" class="card-desc" v-html="renderDescHtml(card.description)"></div>
             <div
               class="card-status"
               @click.stop
@@ -1098,7 +1258,7 @@ onBeforeUnmount(() => {
   <!-- Card dialog -->
   <dialog ref="cardDialogEl" class="card-dialog" @close="onCardDialogClose">
     <form method="dialog" class="dialog-form card-dialog-form" @submit.prevent="saveCardFromDialog">
-      <h2>{{ cardDialogTitle }}</h2>
+      <h2>{{ cardDialogTitle }}<span v-if="cardDialogRef" class="card-dialog-ref">{{ cardDialogRef }}</span></h2>
       <label class="card-dialog-title">
         Title
         <input
@@ -1186,8 +1346,7 @@ onBeforeUnmount(() => {
             ref="cardDescTextarea"
             v-model="cardDesc"
             maxlength="4000"
-            placeholder="Optional details… Keys like CX-1831 become links"
-            @blur="onDescBlur"
+            placeholder="Optional details… Markdown supported (links, lists, `code`); CX-1831 becomes a link"
           ></textarea>
           <div
             v-else
@@ -1195,23 +1354,11 @@ onBeforeUnmount(() => {
             role="button"
             tabindex="0"
             :title="cardDesc ? 'Click to edit' : 'Click to add a description'"
-            @click="startDescEdit"
-            @keydown.enter.prevent="startDescEdit"
-            @keydown.space.prevent="startDescEdit"
+            @click="onDescViewClick"
+            @keydown.enter.prevent="onDescViewKeydown"
+            @keydown.space.prevent="onDescViewKeydown"
           >
-            <template v-if="cardDesc">
-              <template v-for="(part, i) in linkifyJira(cardDesc)" :key="'desc' + i">
-                <a
-                  v-if="part.type === 'jira'"
-                  class="jira-link"
-                  :href="jiraBrowseUrl(part.key)"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  @click.stop
-                >{{ part.key }}</a>
-                <span v-else>{{ part.value }}</span>
-              </template>
-            </template>
+            <div v-if="cardDesc" class="md-body" v-html="renderDescHtml(cardDesc)"></div>
             <span v-else class="card-dialog-desc-placeholder">Click to add a description…</span>
           </div>
         </div>
@@ -1291,7 +1438,7 @@ onBeforeUnmount(() => {
       <ul v-else class="archive-list">
         <li v-for="card in archivedCards" :key="card.id" class="archive-item">
           <div class="archive-item-main">
-            <div class="archive-item-title">{{ card.title }}</div>
+            <div class="archive-item-title"><span v-if="card.ref" class="card-ref">{{ card.ref }}</span> {{ card.title }}</div>
             <div class="archive-item-meta">
               <span>{{ kindDef(normalizeKind(card.kind)).label }}</span>
               <span v-if="card.columnTitle">· {{ card.columnTitle }}</span>

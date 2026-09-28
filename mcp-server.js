@@ -121,10 +121,10 @@ server.tool(
 
 server.tool(
   "update_card",
-  "Update a card's title, description, Jira key, due date, work type, and/or progress stage. Changing dueBy re-ranks the column.",
+  "Update a card's title, description, Jira key, due date, work type, and/or progress stage. Changing dueBy re-ranks the column. cardId accepts a card ID or PP-n ref (e.g. PP-12).",
   {
     columnId: z.string().describe("The column ID containing the card (kept for compatibility)"),
-    cardId: z.string().describe("The card ID to update"),
+    cardId: z.string().describe("The card ID or PP-n ref to update (e.g. PP-12)"),
     title: z.string().optional().describe("New title (omit to keep current)"),
     description: z.string().optional().describe("New description (omit to keep current)"),
     jiraKey: z
@@ -162,10 +162,10 @@ server.tool(
 
 server.tool(
   "delete_card",
-  "Soft-archive a card (recoverable from the Archive screen). Done cards also auto-archive after 5 days.",
+  "Soft-archive a card (recoverable from the Archive screen). Done cards also auto-archive after 5 days. cardId accepts a card ID or PP-n ref (e.g. PP-12).",
   {
     columnId: z.string().describe("The column ID containing the card (kept for compatibility)"),
-    cardId: z.string().describe("The card ID to archive"),
+    cardId: z.string().describe("The card ID or PP-n ref to archive (e.g. PP-12)"),
   },
   async ({ cardId }) => {
     await api(`/api/cards/${encodeURIComponent(cardId)}`, { method: "DELETE" });
@@ -175,12 +175,11 @@ server.tool(
 
 server.tool(
   "move_card",
-  "Move a card from one column to another (optionally at a specific position)",
+  "Move a card from one column to another (optionally at a specific position). cardId accepts a card ID or PP-n ref (e.g. PP-12).",
   {
     fromColumnId: z.string().describe("Source column ID"),
     toColumnId: z.string().describe("Destination column ID"),
-    cardId: z.string().describe("The card ID to move"),
-    position: z.number().optional().describe("Target index in the destination column (omit to append)"),
+    cardId: z.string().describe("The card ID or PP-n ref to move (e.g. PP-12)"),
   },
   async ({ fromColumnId, toColumnId, cardId, position }) => {
     const board = await api("/api/board");
@@ -189,20 +188,22 @@ server.tool(
     if (!fromCol) return { content: [{ type: "text", text: `Source column not found: ${fromColumnId}` }], isError: true };
     if (!toCol) return { content: [{ type: "text", text: `Destination column not found: ${toColumnId}` }], isError: true };
 
-    const fromIndex = fromCol.cards.findIndex((c) => c.id === cardId);
+    const cards = board.columns.flatMap((c) => c.cards);
+    const card = cards.find((c) => c.id === cardId || c.ref === cardId || String(c.number) === String(cardId));
+    if (!card) return { content: [{ type: "text", text: `Card not found: ${cardId}` }], isError: true };
+    const resolvedId = card.id;
+
+    const fromIndex = fromCol.cards.findIndex((c) => c.id === resolvedId);
     if (fromIndex === -1) return { content: [{ type: "text", text: `Card not found: ${cardId}` }], isError: true };
 
     // Compute the destination column's final ordering locally, then persist it.
     const fromId = fromCol.id;
-    const cards = board.columns.flatMap((c) => c.cards);
-    const card = cards.find((c) => c.id === cardId);
     let target = toCol.cards.map((c) => c.id);
     if (fromId === toColumnId) {
-      target = target.filter((id) => id !== cardId);
+      target = target.filter((id) => id !== resolvedId);
     }
     const pos = position !== undefined ? Math.min(position, target.length) : target.length;
-    target.splice(pos, 0, cardId);
-
+    target.splice(pos, 0, resolvedId);
     await api("/api/cards/reorder", {
       method: "POST",
       body: JSON.stringify({ columnId: toColumnId, orderedIds: target }),

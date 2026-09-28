@@ -36,6 +36,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS cards (
     id            TEXT PRIMARY KEY,
     column_id     TEXT NOT NULL REFERENCES columns(id) ON DELETE CASCADE,
+    number        INTEGER,
     title         TEXT NOT NULL,
     description   TEXT NOT NULL DEFAULT '',
     jira_key      TEXT NOT NULL DEFAULT '',
@@ -72,9 +73,33 @@ if (!cardColumnNames.has('completed_at')) {
 if (!cardColumnNames.has('archived_at')) {
   db.exec(`ALTER TABLE cards ADD COLUMN archived_at TEXT`)
 }
+if (!cardColumnNames.has('number')) {
+  db.exec(`ALTER TABLE cards ADD COLUMN number INTEGER`)
+  // Backfill existing cards in creation order so refs are stable.
+  db.exec(`
+    UPDATE cards
+    SET number = (
+      SELECT COUNT(*) FROM cards c2 WHERE c2.rowid <= cards.rowid
+    )
+    WHERE number IS NULL
+  `)
+}
 
-// Index depends on archived_at — create only after migrations above.
-db.exec(`CREATE INDEX IF NOT EXISTS idx_cards_archived ON cards (archived_at)`)
+// Monotonic card-number counter — never reuses numbers of deleted cards.
+db.exec(`CREATE TABLE IF NOT EXISTS card_counter (id INTEGER PRIMARY KEY CHECK (id = 1), next INTEGER NOT NULL)`)
+{
+  const maxRow = db.prepare('SELECT COALESCE(MAX(number), 0) AS m FROM cards').get() as { m: number }
+  const row = db.prepare('SELECT next FROM card_counter WHERE id = 1').get() as { next: number } | undefined
+  if (!row) {
+    db.prepare('INSERT INTO card_counter (id, next) VALUES (1, ?)').run(maxRow.m + 1)
+  } else if (row.next <= maxRow.m) {
+    db.prepare('UPDATE card_counter SET next = ? WHERE id = 1').run(maxRow.m + 1)
+  }
+}
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_number ON cards (number)`)
+ 
+// Index depends on archived_at / number — create only after migrations above.
+ db.exec(`CREATE INDEX IF NOT EXISTS idx_cards_archived ON cards (archived_at)`)
 
 /** Days a card stays Done on the board before soft-archiving. */
 export const ARCHIVE_AFTER_DAYS = 5
@@ -120,6 +145,10 @@ export interface Column {
 
 export interface Card {
   id: string
+  /** Monotonic card number; user-facing ref is `PP-<number>` */
+  number: number
+  /** Stable human ref, e.g. `PP-12` — use in MCP/API/UI */
+  ref: string
   title: string
   description: string
   jiraKey: string
@@ -135,7 +164,6 @@ export interface Card {
   archivedAt: string | null
   columnId: string
 }
-
 export interface ArchivedCard extends Card {
   columnTitle: string | null
 }
@@ -144,6 +172,7 @@ interface ColumnRow { id: string; title: string; position: number }
 interface CardRow {
   id: string
   column_id: string
+  number: number | null
   title: string
   description: string
   jira_key: string
@@ -155,10 +184,28 @@ interface CardRow {
   archived_at: string | null
 }
 
+/** Prefix for user-facing card refs (`PP-12`). */
+export const CARD_REF_PREFIX = 'PP'
+
+export function cardRef(number: number): string {
+  return `${CARD_REF_PREFIX}-${number}`
+}
+
+/** Parse `PP-12` (case-insensitive, surrounding whitespace ok) to `12`, else `null`. */
+export function parseCardRef(ref: string): number | null {
+  const m = /^\s*PP-(\d+)\s*$/i.exec(ref)
+  if (!m) return null
+  const n = Number(m[1])
+  return Number.isSafeInteger(n) && n > 0 ? n : null
+}
+
 function toCard(row: CardRow): Card {
   const kind = normalizeKind(row.kind)
+  const number = row.number ?? 0
   return {
     id: row.id,
+    number,
+    ref: cardRef(number),
     title: row.title,
     description: row.description,
     jiraKey: row.jira_key || '',
@@ -233,6 +280,25 @@ function resolveCompletedAt(
   return null
 }
 
+/** Atomically claim the next monotonic card number. */
+function nextCardNumber(): number {
+  const row = db
+    .prepare('UPDATE card_counter SET next = next + 1 WHERE id = 1 RETURNING next - 1 AS n')
+    .get() as { n: number } | undefined
+  if (row) return row.n
+  // Counter row missing (unexpected) — rebuild from max and retry.
+  const maxRow = db.prepare('SELECT COALESCE(MAX(number), 0) AS m FROM cards').get() as { m: number }
+  db.prepare('INSERT OR IGNORE INTO card_counter (id, next) VALUES (1, ?)').run(maxRow.m + 1)
+  return (db.prepare('UPDATE card_counter SET next = next + 1 WHERE id = 1 RETURNING next - 1 AS n').get() as { n: number }).n
+}
+/** Map a user-facing `PP-12` ref (or raw card id) to the internal card id. */
+export function resolveCardId(refOrId: string): string {
+  const n = parseCardRef(refOrId)
+  if (n === null) return refOrId
+  const row = db.prepare('SELECT id FROM cards WHERE number = ?').get(n) as { id: string } | undefined
+  return row ? row.id : refOrId
+}
+
 /* ── Queries ───────────────────────────────────────────────────────────────── */
 
 export function getBoard(): { columns: Column[] } {
@@ -243,7 +309,7 @@ export function getBoard(): { columns: Column[] } {
     .all() as ColumnRow[]
   const cards = db
     .prepare(
-      `SELECT id, column_id, title, description, jira_key, due_by, kind, progress, position,
+      `SELECT id, column_id, number, title, description, jira_key, due_by, kind, progress, position,
               completed_at, archived_at
        FROM cards
        WHERE archived_at IS NULL
@@ -272,7 +338,7 @@ export function getArchivedCards(): ArchivedCard[] {
 
   const rows = db
     .prepare(
-      `SELECT c.id, c.column_id, c.title, c.description, c.jira_key, c.due_by, c.kind, c.progress,
+      `SELECT c.id, c.column_id, c.number, c.title, c.description, c.jira_key, c.due_by, c.kind, c.progress,
               c.position, c.completed_at, c.archived_at, col.title AS column_title
        FROM cards c
        LEFT JOIN columns col ON col.id = c.column_id
@@ -366,6 +432,7 @@ export function addCard(
   const card: CardRow = {
     id: uid('card'),
     column_id: columnId,
+    number: nextCardNumber(),
     title,
     description,
     jira_key: jiraKey,
@@ -378,11 +445,12 @@ export function addCard(
   }
   db.prepare(
     `INSERT INTO cards
-     (id, column_id, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     card.id,
     card.column_id,
+    card.number,
     card.title,
     card.description,
     card.jira_key,

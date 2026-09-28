@@ -1,4 +1,4 @@
-import { updateCard } from '../../db'
+import { cardRef, resolveCardId, updateCard } from '../../db'
 import { normalizeDueBy } from '../../utils/due'
 import { normalizeJiraKey } from '../../utils/jira'
 import { normalizeKind, normalizeProgress } from '../../utils/progress'
@@ -49,12 +49,14 @@ export default defineEventHandler(async (event) => {
         : normalizeProgress(undefined)
   }
 
-  const card = updateCard(id!, changes)
+  const card = updateCard(resolveCardId(id!), changes)
   if (!card) {
     throw createError({ statusCode: 404, statusMessage: 'Card not found' })
   }
   return {
     id: card.id,
+    number: card.number,
+    ref: cardRef(card.number ?? 0),
     title: card.title,
     description: card.description,
     jiraKey: card.jira_key,
