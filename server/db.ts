@@ -2,6 +2,7 @@ import Database from 'better-sqlite3'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import {
+  ARCHIVE_AFTER_DAYS,
   DEFAULT_KIND,
   DEFAULT_PROGRESS,
   normalizeKind,
@@ -116,8 +117,7 @@ db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_number ON cards (number)`)
 // Index depends on archived_at / number — create only after migrations above.
  db.exec(`CREATE INDEX IF NOT EXISTS idx_cards_archived ON cards (archived_at)`)
 
-/** Days a card stays Done on the board before soft-archiving. */
-export const ARCHIVE_AFTER_DAYS = 5
+export { ARCHIVE_AFTER_DAYS }
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -812,14 +812,25 @@ export function deleteCard(id: string): boolean {
  * dues stay nearer the top (manual order is kept among equal/undated cards).
  */
 export function reorderCards(columnId: string, orderedIds: string[]): boolean {
-  if (!getColumn(columnId)) return false
+  const column = getColumn(columnId)
+  if (!column) return false
+  const markDone = column.title.trim().toLowerCase() === 'done'
+  const completedAt = nowIso()
 
   const tx = db.transaction(() => {
     const update = db.prepare(
       `UPDATE cards SET column_id = ?, position = ?
        WHERE id = ? AND archived_at IS NULL`
     )
-    orderedIds.forEach((id, index) => update.run(columnId, index, id))
+    const markDoneStmt = db.prepare(
+      `UPDATE cards
+       SET progress = 'done', completed_at = ?
+       WHERE id = ? AND archived_at IS NULL AND progress != 'done'`
+    )
+    orderedIds.forEach((id, index) => {
+      update.run(columnId, index, id)
+      if (markDone) markDoneStmt.run(completedAt, id)
+    })
   })
   tx()
   rerankColumnByDue(columnId)

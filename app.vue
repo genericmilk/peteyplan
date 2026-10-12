@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
+  ARCHIVE_AFTER_DAYS,
   CARD_KINDS,
   DEFAULT_KIND,
   DEFAULT_PROGRESS,
@@ -24,6 +25,7 @@ interface Card {
   dueBy?: string
   kind?: KindId
   progress?: ProgressId
+  completedAt?: string | null
   releaseId?: string | null
 }
 interface Column { id: string; title: string; cards: Card[] }
@@ -643,6 +645,11 @@ async function setCardProgress(cardId: string, progress: ProgressId) {
       const next = normalizeProgress(progress, kind)
       if (normalizeProgress(card.progress, kind) === next) return
       card.progress = next
+      if (next === 'done') {
+        if (!card.completedAt) card.completedAt = new Date().toISOString()
+      } else {
+        card.completedAt = null
+      }
       break
     }
   }
@@ -651,6 +658,7 @@ async function setCardProgress(cardId: string, progress: ProgressId) {
       method: 'PATCH',
       body: JSON.stringify({ progress }),
     })
+    await refreshBoard()
   } catch (err) {
     fail(err)
     await refreshBoard()
@@ -703,6 +711,38 @@ function isProgressCurrent(card: Card, stageId: ProgressId): boolean {
 
 function showCardDue(card: Card): boolean {
   return !!card.dueBy && cardProgress(card) !== 'done'
+}
+
+function isDoneColumn(column: Column): boolean {
+  return column.title.trim().toLowerCase() === 'done'
+}
+
+/** Remaining time until a Done card auto-archives, or null when not applicable. */
+function archiveCountdown(card: Card): string | null {
+  if (cardProgress(card) !== 'done' || !card.completedAt) return null
+  const completed = new Date(card.completedAt).getTime()
+  if (Number.isNaN(completed)) return null
+  const archiveAt = completed + ARCHIVE_AFTER_DAYS * 24 * 60 * 60 * 1000
+  const ms = archiveAt - Date.now()
+  if (ms <= 0) return 'Archiving soon'
+  const days = Math.ceil(ms / (24 * 60 * 60 * 1000))
+  if (days <= 1) return 'Archives today'
+  if (days === 2) return 'Archives tomorrow'
+  return `Archives in ${days} days`
+}
+
+function archiveCountdownTitle(card: Card): string {
+  if (!card.completedAt) return ''
+  const completed = new Date(card.completedAt)
+  if (Number.isNaN(completed.getTime())) return ''
+  const archiveAt = new Date(completed.getTime() + ARCHIVE_AFTER_DAYS * 24 * 60 * 60 * 1000)
+  return `Auto-archives ${archiveAt.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })}`
 }
 
 function onCardKindChange(cardId: string, event: Event) {
@@ -939,6 +979,12 @@ async function moveCard(cardId: string, toColumnId: string, index: number) {
 
   if (index > toCol.cards.length) index = toCol.cards.length
   toCol.cards.splice(index, 0, moved)
+
+  // Dropping into Done lights the Done progress trail and starts the archive clock.
+  if (isDoneColumn(toCol) && cardProgress(moved) !== 'done') {
+    moved.progress = 'done'
+    moved.completedAt = new Date().toISOString()
+  }
 
   // Persist the full new ordering of the destination column, then refresh
   // so due-date auto-rank from the server is applied.
@@ -1627,6 +1673,11 @@ onBeforeUnmount(() => {
                 :class="'due-' + dueTone(card.dueBy)"
                 :title="'Due ' + formatDueBy(card.dueBy!)"
               >{{ formatDueBy(card.dueBy!) }}</span>
+              <span
+                v-if="archiveCountdown(card)"
+                class="card-archive-in"
+                :title="archiveCountdownTitle(card)"
+              >{{ archiveCountdown(card) }}</span>
             </div>
             <div class="card-title">
               <template v-for="(part, i) in linkifyJira(card.title)" :key="'t' + i">
@@ -1961,7 +2012,7 @@ onBeforeUnmount(() => {
       <div class="archive-dialog-header">
         <h2>Archive</h2>
         <p class="archive-dialog-hint">
-          Done cards auto-archive after 5 days. Soft-deleted cards are recoverable here.
+          Done cards auto-archive after {{ ARCHIVE_AFTER_DAYS }} days. Soft-deleted cards are recoverable here.
         </p>
       </div>
       <div v-if="archiveLoading" class="archive-empty">Loading archive…</div>

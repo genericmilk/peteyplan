@@ -40,6 +40,9 @@ export type ProgressId = (typeof CARD_KINDS)[number]['stages'][number]['id']
 export const DEFAULT_KIND: KindId = 'development'
 export const DEFAULT_PROGRESS: ProgressId = 'todo'
 
+/** Days a Done card stays on the board before soft-archiving. */
+export const ARCHIVE_AFTER_DAYS = 5
+
 export const KIND_IDS: readonly KindId[] = CARD_KINDS.map((k) => k.id)
 
 /** Flat list of every stage id across kinds (for loose validation). */
