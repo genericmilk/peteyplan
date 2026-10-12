@@ -136,6 +136,12 @@ body {
 
 .btn-primary:hover { background: var(--accent-hover); }
 
+.btn-active {
+  border-color: var(--accent);
+  background: rgba(91, 140, 255, 0.16);
+  color: var(--text);
+}
+
 .btn-danger {
   background: transparent;
   border-color: rgba(242, 139, 139, 0.5);
@@ -158,6 +164,293 @@ body {
 .btn-icon:hover { background: var(--bg-hover); color: var(--text); }
 
 .hidden { display: none !important; }
+
+/* Releases panel */
+.releases-panel {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #1e232c 0%, var(--bg) 100%);
+  padding: 14px 24px 16px;
+  max-height: min(42vh, 360px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: releases-slide 0.2s ease-out;
+}
+
+@keyframes releases-slide {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.releases-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.releases-panel-header h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.releases-panel-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.releases-row {
+  display: flex;
+  gap: 14px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  min-height: 0;
+  flex: 1 1 auto;
+  align-items: stretch;
+}
+
+.release-folder {
+  flex: 0 0 280px;
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  min-height: 160px;
+  max-height: 280px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.release-folder.drop-target {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(91, 140, 255, 0.35);
+}
+
+.release-folder-header {
+  padding: 12px 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.release-folder-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.release-folder-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.release-folder-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg);
+  border-radius: 20px;
+  padding: 2px 8px;
+}
+
+.release-schedule {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.release-schedule-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  font-size: 11px;
+}
+
+.release-env {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #8fd0a8;
+  min-width: 52px;
+}
+
+.release-env-prod {
+  color: #f0b27a;
+}
+
+.release-when {
+  color: var(--text-muted);
+  flex: 1 1 auto;
+}
+
+.release-ticket {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: rgba(91, 140, 255, 0.14);
+  border: 1px solid rgba(91, 140, 255, 0.35);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-decoration: none;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+a.release-ticket:hover {
+  background: rgba(91, 140, 255, 0.24);
+  text-decoration: underline;
+}
+
+button.release-ticket {
+  appearance: none;
+  font: inherit;
+}
+
+.release-ticket-missing {
+  background: transparent;
+  border-style: dashed;
+  color: var(--text-muted);
+}
+
+.release-ticket-missing:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.release-cards {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.release-card {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px 4px 2px 8px;
+}
+
+.release-card-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  padding: 6px 0;
+}
+
+.release-card-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.release-card-remove {
+  flex: 0 0 auto;
+}
+
+.release-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+  padding: 18px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
+.releases-empty-state {
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 28px 16px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  min-width: 260px;
+  display: flex;
+  align-items: center;
+}
+
+.card-release {
+  appearance: none;
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: rgba(143, 208, 168, 0.12);
+  border: 1px solid rgba(143, 208, 168, 0.4);
+  color: #8fd0a8;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  line-height: 1.4;
+  cursor: pointer;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-release:hover {
+  background: rgba(143, 208, 168, 0.2);
+}
+
+.release-dialog {
+  width: min(480px, calc(100vw - 32px));
+}
+
+.release-dialog-schedule {
+  margin: -4px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.release-dialog-tickets {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.release-dialog-tickets input {
+  width: 100%;
+  margin-top: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.release-dialog-tickets input:focus {
+  border-color: var(--accent);
+}
 
 /* Board */
 .board {

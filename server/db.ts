@@ -48,8 +48,19 @@ db.exec(`
     archived_at   TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS releases (
+    id           TEXT PRIMARY KEY,
+    title        TEXT NOT NULL,
+    week_start   TEXT NOT NULL,
+    preprod_key  TEXT NOT NULL DEFAULT '',
+    prod_key     TEXT NOT NULL DEFAULT '',
+    position     INTEGER NOT NULL DEFAULT 0
+  );
+
   CREATE INDEX IF NOT EXISTS idx_columns_position ON columns (position);
   CREATE INDEX IF NOT EXISTS idx_cards_column_position ON cards (column_id, position);
+  CREATE INDEX IF NOT EXISTS idx_releases_week ON releases (week_start);
+  CREATE INDEX IF NOT EXISTS idx_releases_position ON releases (position);
 `)
 
 // Lightweight migrations for DBs created before newer card columns existed.
@@ -73,6 +84,9 @@ if (!cardColumnNames.has('completed_at')) {
 if (!cardColumnNames.has('archived_at')) {
   db.exec(`ALTER TABLE cards ADD COLUMN archived_at TEXT`)
 }
+if (!cardColumnNames.has('release_id')) {
+  db.exec(`ALTER TABLE cards ADD COLUMN release_id TEXT`)
+}
 if (!cardColumnNames.has('number')) {
   db.exec(`ALTER TABLE cards ADD COLUMN number INTEGER`)
   // Backfill existing cards in creation order so refs are stable.
@@ -84,6 +98,7 @@ if (!cardColumnNames.has('number')) {
     WHERE number IS NULL
   `)
 }
+db.exec(`CREATE INDEX IF NOT EXISTS idx_cards_release ON cards (release_id)`)
 
 // Monotonic card-number counter — never reuses numbers of deleted cards.
 db.exec(`CREATE TABLE IF NOT EXISTS card_counter (id INTEGER PRIMARY KEY CHECK (id = 1), next INTEGER NOT NULL)`)
@@ -163,12 +178,37 @@ export interface Card {
   /** ISO datetime when soft-archived, or null */
   archivedAt: string | null
   columnId: string
+  /** Assigned release folder id, or null */
+  releaseId: string | null
 }
+
+export interface Release {
+  id: string
+  title: string
+  /** Monday of the release week (YYYY-MM-DD) */
+  weekStart: string
+  /** Fixed schedule labels for the UI */
+  preprodSchedule: string
+  prodSchedule: string
+  /** Atlassian Jira keys (preprod release + prod CM ticket) */
+  preprodKey: string
+  prodKey: string
+  cards: Card[]
+}
+
 export interface ArchivedCard extends Card {
   columnTitle: string | null
 }
 
 interface ColumnRow { id: string; title: string; position: number }
+interface ReleaseRow {
+  id: string
+  title: string
+  week_start: string
+  preprod_key: string
+  prod_key: string
+  position: number
+}
 interface CardRow {
   id: string
   column_id: string
@@ -182,6 +222,7 @@ interface CardRow {
   position: number
   completed_at: string | null
   archived_at: string | null
+  release_id: string | null
 }
 
 /** Prefix for user-facing card refs (`PP-12`). */
@@ -197,6 +238,45 @@ export function parseCardRef(ref: string): number | null {
   if (!m) return null
   const n = Number(m[1])
   return Number.isSafeInteger(n) && n > 0 ? n : null
+}
+
+/** Preprod window: Monday 17:00. Prod go-live: Tuesday 17:00. */
+export const PREPROD_SCHEDULE_LABEL = 'Monday 17:00'
+export const PROD_SCHEDULE_LABEL = 'Tuesday 17:00'
+
+function isoDate(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+/** Next Monday on/after `from` (local calendar date). */
+export function nextMondayIso(from = new Date()): string {
+  const d = new Date(from.getFullYear(), from.getMonth(), from.getDate())
+  const day = d.getDay() // 0 Sun … 6 Sat
+  const add = day === 0 ? 1 : day === 1 ? 0 : 8 - day
+  d.setDate(d.getDate() + add)
+  return isoDate(d)
+}
+
+/** Monday strictly after `weekStart` (YYYY-MM-DD). */
+export function mondayAfter(weekStart: string): string {
+  const [y, m, d] = weekStart.split('-').map(Number)
+  const date = new Date(y, (m || 1) - 1, d || 1)
+  date.setDate(date.getDate() + 7)
+  return isoDate(date)
+}
+
+export function defaultReleaseTitle(weekStart: string): string {
+  const [y, m, d] = weekStart.split('-').map(Number)
+  if (!y || !m || !d) return `Release ${weekStart}`
+  const label = new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  })
+  return `Release ${label}`
 }
 
 function toCard(row: CardRow): Card {
@@ -215,6 +295,20 @@ function toCard(row: CardRow): Card {
     completedAt: row.completed_at || null,
     archivedAt: row.archived_at || null,
     columnId: row.column_id,
+    releaseId: row.release_id || null,
+  }
+}
+
+function toRelease(row: ReleaseRow, cards: Card[] = []): Release {
+  return {
+    id: row.id,
+    title: row.title,
+    weekStart: row.week_start,
+    preprodSchedule: PREPROD_SCHEDULE_LABEL,
+    prodSchedule: PROD_SCHEDULE_LABEL,
+    preprodKey: row.preprod_key || '',
+    prodKey: row.prod_key || '',
+    cards,
   }
 }
 
@@ -301,7 +395,7 @@ export function resolveCardId(refOrId: string): string {
 
 /* ── Queries ───────────────────────────────────────────────────────────────── */
 
-export function getBoard(): { columns: Column[] } {
+export function getBoard(): { columns: Column[]; releases: Release[] } {
   archiveStaleDoneCards()
 
   const columns = db
@@ -310,7 +404,7 @@ export function getBoard(): { columns: Column[] } {
   const cards = db
     .prepare(
       `SELECT id, column_id, number, title, description, jira_key, due_by, kind, progress, position,
-              completed_at, archived_at
+              completed_at, archived_at, release_id
        FROM cards
        WHERE archived_at IS NULL
        ORDER BY ${CARD_ORDER_SQL}`
@@ -318,10 +412,13 @@ export function getBoard(): { columns: Column[] } {
     .all() as CardRow[]
 
   const byColumn = new Map<string, Card[]>()
-  for (const card of cards) {
-    const list = byColumn.get(card.column_id) || []
-    list.push(toCard(card))
-    byColumn.set(card.column_id, list)
+  const cardById = new Map<string, Card>()
+  for (const row of cards) {
+    const card = toCard(row)
+    cardById.set(card.id, card)
+    const list = byColumn.get(row.column_id) || []
+    list.push(card)
+    byColumn.set(row.column_id, list)
   }
 
   return {
@@ -330,7 +427,140 @@ export function getBoard(): { columns: Column[] } {
       title: col.title,
       cards: byColumn.get(col.id) || [],
     })),
+    releases: getReleases(cardById),
   }
+}
+
+export function getRelease(id: string): ReleaseRow | undefined {
+  return db
+    .prepare('SELECT id, title, week_start, preprod_key, prod_key, position FROM releases WHERE id = ?')
+    .get(id) as ReleaseRow | undefined
+}
+
+export function getCardRow(id: string): CardRow | undefined {
+  return db.prepare('SELECT * FROM cards WHERE id = ?').get(id) as CardRow | undefined
+}
+
+export function getReleases(cardById?: Map<string, Card>): Release[] {
+  const rows = db
+    .prepare(
+      `SELECT id, title, week_start, preprod_key, prod_key, position
+       FROM releases
+       ORDER BY week_start ASC, position ASC, rowid ASC`
+    )
+    .all() as ReleaseRow[]
+
+  let cardsMap = cardById
+  if (!cardsMap) {
+    const cards = db
+      .prepare(
+        `SELECT id, column_id, number, title, description, jira_key, due_by, kind, progress, position,
+                completed_at, archived_at, release_id
+         FROM cards
+         WHERE archived_at IS NULL AND release_id IS NOT NULL
+         ORDER BY ${CARD_ORDER_SQL}`
+      )
+      .all() as CardRow[]
+    cardsMap = new Map(cards.map((row) => [row.id, toCard(row)]))
+  }
+
+  const byRelease = new Map<string, Card[]>()
+  for (const card of cardsMap.values()) {
+    if (!card.releaseId) continue
+    const list = byRelease.get(card.releaseId) || []
+    list.push(card)
+    byRelease.set(card.releaseId, list)
+  }
+
+  return rows.map((row) => toRelease(row, byRelease.get(row.id) || []))
+}
+
+/** First unused Monday on/after today (or after the latest existing release). */
+export function suggestNextWeekStart(): string {
+  const latest = db
+    .prepare('SELECT week_start FROM releases ORDER BY week_start DESC LIMIT 1')
+    .get() as { week_start: string } | undefined
+  let candidate = nextMondayIso()
+  if (latest?.week_start && latest.week_start >= candidate) {
+    candidate = mondayAfter(latest.week_start)
+  }
+  while (db.prepare('SELECT 1 FROM releases WHERE week_start = ?').get(candidate)) {
+    candidate = mondayAfter(candidate)
+  }
+  return candidate
+}
+
+export function addRelease(input: {
+  title?: string
+  weekStart?: string
+  preprodKey?: string
+  prodKey?: string
+}): Release {
+  const weekStart = input.weekStart && /^\d{4}-\d{2}-\d{2}$/.test(input.weekStart)
+    ? input.weekStart
+    : suggestNextWeekStart()
+  const title = (input.title || '').trim() || defaultReleaseTitle(weekStart)
+  const position =
+    (db.prepare('SELECT COALESCE(MAX(position), -1) AS m FROM releases').get() as { m: number }).m + 1
+  const row: ReleaseRow = {
+    id: uid('rel'),
+    title,
+    week_start: weekStart,
+    preprod_key: input.preprodKey || '',
+    prod_key: input.prodKey || '',
+    position,
+  }
+  db.prepare(
+    `INSERT INTO releases (id, title, week_start, preprod_key, prod_key, position)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(row.id, row.title, row.week_start, row.preprod_key, row.prod_key, row.position)
+  return toRelease(row, [])
+}
+
+export function updateRelease(
+  id: string,
+  changes: {
+    title?: string
+    weekStart?: string
+    preprodKey?: string
+    prodKey?: string
+  }
+): Release | undefined {
+  const existing = getRelease(id)
+  if (!existing) return undefined
+
+  const title = changes.title !== undefined ? changes.title.trim() || existing.title : existing.title
+  const week_start =
+    changes.weekStart !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(changes.weekStart)
+      ? changes.weekStart
+      : existing.week_start
+  const preprod_key = changes.preprodKey !== undefined ? changes.preprodKey : existing.preprod_key
+  const prod_key = changes.prodKey !== undefined ? changes.prodKey : existing.prod_key
+
+  db.prepare(
+    `UPDATE releases SET title = ?, week_start = ?, preprod_key = ?, prod_key = ? WHERE id = ?`
+  ).run(title, week_start, preprod_key, prod_key, id)
+
+  const updated = getRelease(id)!
+  const cards = getReleases().find((r) => r.id === id)?.cards || []
+  return toRelease(updated, cards)
+}
+
+export function deleteRelease(id: string): boolean {
+  if (!getRelease(id)) return false
+  db.transaction(() => {
+    db.prepare('UPDATE cards SET release_id = NULL WHERE release_id = ?').run(id)
+    db.prepare('DELETE FROM releases WHERE id = ?').run(id)
+  })()
+  return true
+}
+
+export function setCardRelease(cardId: string, releaseId: string | null): CardRow | undefined {
+  const existing = db.prepare('SELECT * FROM cards WHERE id = ?').get(cardId) as CardRow | undefined
+  if (!existing || existing.archived_at) return undefined
+  if (releaseId && !getRelease(releaseId)) return undefined
+  db.prepare('UPDATE cards SET release_id = ? WHERE id = ?').run(releaseId, cardId)
+  return db.prepare('SELECT * FROM cards WHERE id = ?').get(cardId) as CardRow
 }
 
 export function getArchivedCards(): ArchivedCard[] {
@@ -339,7 +569,7 @@ export function getArchivedCards(): ArchivedCard[] {
   const rows = db
     .prepare(
       `SELECT c.id, c.column_id, c.number, c.title, c.description, c.jira_key, c.due_by, c.kind, c.progress,
-              c.position, c.completed_at, c.archived_at, col.title AS column_title
+              c.position, c.completed_at, c.archived_at, c.release_id, col.title AS column_title
        FROM cards c
        LEFT JOIN columns col ON col.id = c.column_id
        WHERE c.archived_at IS NOT NULL
@@ -442,11 +672,12 @@ export function addCard(
     position,
     completed_at,
     archived_at: null,
+    release_id: null,
   }
   db.prepare(
     `INSERT INTO cards
-     (id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at, release_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     card.id,
     card.column_id,
@@ -459,7 +690,8 @@ export function addCard(
     card.progress,
     card.position,
     card.completed_at,
-    card.archived_at
+    card.archived_at,
+    card.release_id
   )
   rerankColumnByDue(columnId)
   const ranked = db.prepare('SELECT * FROM cards WHERE id = ?').get(card.id) as CardRow
@@ -476,6 +708,7 @@ export function updateCard(
     kind?: KindId
     progress?: ProgressId
     column_id?: string
+    releaseId?: string | null
   }
 ): CardRow | undefined {
   const existing = db.prepare('SELECT * FROM cards WHERE id = ?').get(id) as CardRow | undefined
@@ -494,11 +727,16 @@ export function updateCard(
         ? progressForKindChange(existing.progress, fromKind, kind)
         : normalizeProgress(existing.progress, kind)
   const completed_at = resolveCompletedAt(progress, existing.progress, existing.completed_at)
+  let release_id = existing.release_id
+  if (changes.releaseId !== undefined) {
+    if (changes.releaseId && !getRelease(changes.releaseId)) return undefined
+    release_id = changes.releaseId
+  }
   db.prepare(
     `UPDATE cards
-     SET title = ?, description = ?, jira_key = ?, due_by = ?, kind = ?, progress = ?, completed_at = ?
+     SET title = ?, description = ?, jira_key = ?, due_by = ?, kind = ?, progress = ?, completed_at = ?, release_id = ?
      WHERE id = ?`
-  ).run(title, description, jira_key, due_by, kind, progress, completed_at, id)
+  ).run(title, description, jira_key, due_by, kind, progress, completed_at, release_id, id)
 
   rerankColumnByDue(existing.column_id)
   return db.prepare('SELECT * FROM cards WHERE id = ?').get(id) as CardRow

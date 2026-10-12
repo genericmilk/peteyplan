@@ -12,6 +12,7 @@ export default defineEventHandler(async (event) => {
     dueBy?: unknown
     kind?: unknown
     progress?: unknown
+    releaseId?: unknown
   }>(event)
 
   const changes: {
@@ -21,6 +22,7 @@ export default defineEventHandler(async (event) => {
     dueBy?: string
     kind?: ReturnType<typeof normalizeKind>
     progress?: ReturnType<typeof normalizeProgress>
+    releaseId?: string | null
   } = {}
   if (body?.title !== undefined) {
     const title = typeof body.title === 'string' ? body.title.trim() : ''
@@ -48,6 +50,15 @@ export default defineEventHandler(async (event) => {
         ? (body.progress as ReturnType<typeof normalizeProgress>)
         : normalizeProgress(undefined)
   }
+  if (body?.releaseId !== undefined) {
+    if (body.releaseId === null || body.releaseId === '') {
+      changes.releaseId = null
+    } else if (typeof body.releaseId === 'string') {
+      changes.releaseId = body.releaseId
+    } else {
+      throw createError({ statusCode: 400, statusMessage: 'releaseId must be a string or null' })
+    }
+  }
 
   const card = updateCard(resolveCardId(id!), changes)
   if (!card) {
@@ -66,6 +77,7 @@ export default defineEventHandler(async (event) => {
     completedAt: card.completed_at,
     archivedAt: card.archived_at,
     columnId: card.column_id,
+    releaseId: card.release_id,
     position: card.position,
   }
 })

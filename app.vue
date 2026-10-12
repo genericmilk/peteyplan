@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   CARD_KINDS,
   DEFAULT_KIND,
@@ -24,9 +24,20 @@ interface Card {
   dueBy?: string
   kind?: KindId
   progress?: ProgressId
+  releaseId?: string | null
 }
 interface Column { id: string; title: string; cards: Card[] }
-interface Board { columns: Column[] }
+interface Release {
+  id: string
+  title: string
+  weekStart: string
+  preprodSchedule: string
+  prodSchedule: string
+  preprodKey: string
+  prodKey: string
+  cards: Card[]
+}
+interface Board { columns: Column[]; releases: Release[] }
 interface ArchivedCard {
   id: string
   number: number
@@ -76,6 +87,8 @@ const JIRA_BROWSE_BASE = 'https://kycglobal.atlassian.net/browse'
 const JIRA_KEY_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/g
 const JIRA_URL_RE =
   /https?:\/\/kycglobal\.atlassian\.net\/browse\/([A-Z][A-Z0-9]+-\d+)/gi
+const PREPROD_HINT = 'Monday 17:00'
+const PROD_HINT = 'Tuesday 17:00'
 
 function jiraBrowseUrl(key: string) {
   return `${JIRA_BROWSE_BASE}/${key}`
@@ -279,10 +292,12 @@ function renderDescHtml(input: string): string {
 
 /* ── State ─────────────────────────────────────────────────────────────────── */
 
-const board = ref<Board>({ columns: [] })
+const board = ref<Board>({ columns: [], releases: [] })
 const loading = ref(true)
 const error = ref<string | null>(null)
 const searchQuery = ref('')
+const releasesOpen = ref(false)
+const releaseDropTarget = ref<string | null>(null)
 
 const isSearching = computed(() => searchQuery.value.trim().length > 0)
 
@@ -339,10 +354,17 @@ async function api<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
+function normalizeBoard(data: Board): Board {
+  return {
+    columns: data.columns || [],
+    releases: data.releases || [],
+  }
+}
+
 async function loadBoard() {
   loading.value = true
   try {
-    board.value = await api<Board>('/api/board')
+    board.value = normalizeBoard(await api<Board>('/api/board'))
     error.value = null
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to load board'
@@ -353,7 +375,7 @@ async function loadBoard() {
 
 async function refreshBoard() {
   try {
-    board.value = await api<Board>('/api/board')
+    board.value = normalizeBoard(await api<Board>('/api/board'))
     error.value = null
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to save'
@@ -368,6 +390,153 @@ function fail(err: unknown) {
 
 function findColumn(columnId: string) {
   return board.value.columns.find((c) => c.id === columnId)
+}
+
+function findRelease(releaseId: string) {
+  return board.value.releases.find((r) => r.id === releaseId)
+}
+
+function releaseTitleForCard(card: Card): string | null {
+  if (!card.releaseId) return null
+  return findRelease(card.releaseId)?.title ?? null
+}
+
+function formatWeekDay(weekStart: string, offsetDays: number): string {
+  const [y, m, d] = weekStart.split('-').map(Number)
+  if (!y || !m || !d) return weekStart
+  const date = new Date(y, m - 1, d + offsetDays)
+  return date.toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  })
+}
+
+function toggleReleasesPanel() {
+  releasesOpen.value = !releasesOpen.value
+}
+
+async function addRelease() {
+  try {
+    await api('/api/releases', { method: 'POST', body: JSON.stringify({}) })
+    await refreshBoard()
+    releasesOpen.value = true
+  } catch (err) { fail(err) }
+}
+
+async function saveRelease(
+  releaseId: string,
+  title: string,
+  weekStart: string,
+  preprodKey: string,
+  prodKey: string
+) {
+  const trimmed = title.trim()
+  if (!trimmed) return
+  try {
+    await api(`/api/releases/${releaseId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        title: trimmed,
+        weekStart: weekStart.trim(),
+        preprodKey: normalizeJiraKey(preprodKey),
+        prodKey: normalizeJiraKey(prodKey),
+      }),
+    })
+    await refreshBoard()
+  } catch (err) { fail(err) }
+}
+
+async function deleteRelease(releaseId: string) {
+  const rel = findRelease(releaseId)
+  if (!rel) return
+  const count = rel.cards.length
+  const message =
+    count > 0
+      ? `Delete "${rel.title}"? Its ${count} card${count === 1 ? '' : 's'} will stay on the board but leave this release.`
+      : `Delete "${rel.title}"?`
+  if (!window.confirm(message)) return
+  try {
+    await api(`/api/releases/${releaseId}`, { method: 'DELETE' })
+    await refreshBoard()
+  } catch (err) { fail(err) }
+}
+
+async function assignCardToRelease(cardId: string, releaseId: string) {
+  // Optimistic: mark on board cards + rebuild release card lists locally.
+  for (const col of board.value.columns) {
+    const card = col.cards.find((c) => c.id === cardId)
+    if (card) {
+      card.releaseId = releaseId
+      break
+    }
+  }
+  syncReleaseCardsFromBoard()
+  try {
+    await api(`/api/releases/${releaseId}/cards`, {
+      method: 'POST',
+      body: JSON.stringify({ cardId }),
+    })
+    await refreshBoard()
+  } catch (err) {
+    fail(err)
+    await refreshBoard()
+  }
+}
+
+async function removeCardFromRelease(releaseId: string, cardId: string) {
+  for (const col of board.value.columns) {
+    const card = col.cards.find((c) => c.id === cardId)
+    if (card && card.releaseId === releaseId) {
+      card.releaseId = null
+      break
+    }
+  }
+  syncReleaseCardsFromBoard()
+  try {
+    await api(`/api/releases/${releaseId}/cards/${cardId}`, { method: 'DELETE' })
+    await refreshBoard()
+  } catch (err) {
+    fail(err)
+    await refreshBoard()
+  }
+}
+
+/** Keep release.cards in sync with column card.releaseId after optimistic edits. */
+function syncReleaseCardsFromBoard() {
+  const all = board.value.columns.flatMap((c) => c.cards)
+  for (const rel of board.value.releases) {
+    rel.cards = all.filter((c) => c.releaseId === rel.id)
+  }
+}
+
+function onReleaseDragOver(event: DragEvent, releaseId: string) {
+  if (isSearching.value || !dragged.value || draggedColumnId.value) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  releaseDropTarget.value = releaseId
+}
+
+function onReleaseDragLeave(event: DragEvent) {
+  const el = event.currentTarget as HTMLElement
+  if (!el.contains(event.relatedTarget as Node | null)) {
+    if (releaseDropTarget.value) releaseDropTarget.value = null
+  }
+}
+
+function onReleaseDrop(event: DragEvent, releaseId: string) {
+  event.preventDefault()
+  event.stopPropagation()
+  const d = dragged.value
+  releaseDropTarget.value = null
+  if (d) {
+    assignCardToRelease(d.cardId, releaseId)
+  }
+  document.removeEventListener('dragover', onDocumentDragOver)
+  stopEdgeScroll()
+  dragged.value = null
+  draggingId.value = null
+  dropIndicator.value = null
 }
 
 /* ── Column actions ────────────────────────────────────────────────────────── */
@@ -558,6 +727,60 @@ const dropIndicator = ref<{ columnId: string; index: number } | null>(null)
 const draggedColumnId = ref<string | null>(null)
 const columnDropIndex = ref<number | null>(null)
 
+const EDGE_SCROLL_ZONE = 72
+const EDGE_SCROLL_MAX = 28
+let edgeScrollRaf: number | null = null
+let edgeScrollSpeed = 0
+
+function stopEdgeScroll() {
+  edgeScrollSpeed = 0
+  if (edgeScrollRaf != null) {
+    cancelAnimationFrame(edgeScrollRaf)
+    edgeScrollRaf = null
+  }
+}
+
+function edgeScrollTick() {
+  edgeScrollRaf = null
+  const el = boardEl.value
+  if (!el || !edgeScrollSpeed || (!dragged.value && !draggedColumnId.value)) {
+    stopEdgeScroll()
+    return
+  }
+  el.scrollLeft += edgeScrollSpeed
+  edgeScrollRaf = requestAnimationFrame(edgeScrollTick)
+}
+
+function updateEdgeScroll(clientX: number) {
+  if (!dragged.value && !draggedColumnId.value) {
+    stopEdgeScroll()
+    return
+  }
+  const width = window.innerWidth
+  let speed = 0
+  if (clientX < EDGE_SCROLL_ZONE) {
+    const t = (EDGE_SCROLL_ZONE - clientX) / EDGE_SCROLL_ZONE
+    speed = -Math.ceil(EDGE_SCROLL_MAX * Math.min(1, Math.max(0, t)))
+  } else if (clientX > width - EDGE_SCROLL_ZONE) {
+    const t = (clientX - (width - EDGE_SCROLL_ZONE)) / EDGE_SCROLL_ZONE
+    speed = Math.ceil(EDGE_SCROLL_MAX * Math.min(1, Math.max(0, t)))
+  }
+
+  edgeScrollSpeed = speed
+  if (!speed) {
+    stopEdgeScroll()
+    return
+  }
+  if (edgeScrollRaf == null) {
+    edgeScrollRaf = requestAnimationFrame(edgeScrollTick)
+  }
+}
+
+function onDocumentDragOver(event: DragEvent) {
+  if (!dragged.value && !draggedColumnId.value) return
+  updateEdgeScroll(event.clientX)
+}
+
 function isDropIndicator(columnId: string, index: number) {
   return !!dropIndicator.value && dropIndicator.value.columnId === columnId && dropIndicator.value.index === index
 }
@@ -579,12 +802,16 @@ function onCardDragStart(event: DragEvent, columnId: string, card: Card) {
   draggingId.value = card.id
   draggedColumnId.value = null
   columnDropIndex.value = null
+  document.addEventListener('dragover', onDocumentDragOver)
 }
 
 function onCardDragEnd() {
+  document.removeEventListener('dragover', onDocumentDragOver)
+  stopEdgeScroll()
   dragged.value = null
   draggingId.value = null
   dropIndicator.value = null
+  releaseDropTarget.value = null
 }
 
 function onColumnHeaderDragStart(event: DragEvent, column: Column) {
@@ -602,9 +829,12 @@ function onColumnHeaderDragStart(event: DragEvent, column: Column) {
   dragged.value = null
   draggingId.value = null
   dropIndicator.value = null
+  document.addEventListener('dragover', onDocumentDragOver)
 }
 
 function onColumnHeaderDragEnd() {
+  document.removeEventListener('dragover', onDocumentDragOver)
+  stopEdgeScroll()
   draggedColumnId.value = null
   columnDropIndex.value = null
 }
@@ -646,6 +876,8 @@ function onColumnDrop(event: DragEvent, column: Column) {
   if (d && indicator && indicator.columnId === column.id) {
     moveCard(d.cardId, column.id, indicator.index)
   }
+  document.removeEventListener('dragover', onDocumentDragOver)
+  stopEdgeScroll()
   dragged.value = null
   draggingId.value = null
   dropIndicator.value = null
@@ -686,6 +918,8 @@ function onBoardDrop(event: DragEvent) {
   if (columnId != null && index != null) {
     moveColumn(columnId, index)
   }
+  document.removeEventListener('dragover', onDocumentDragOver)
+  stopEdgeScroll()
   draggedColumnId.value = null
   columnDropIndex.value = null
 }
@@ -863,6 +1097,65 @@ async function deleteCardFromDialog() {
     await deleteCard(cardDialogCardId.value)
   }
   closeCardDialog()
+}
+
+/* ── Release dialog ────────────────────────────────────────────────────────── */
+
+const releaseDialogEl = ref<HTMLDialogElement | null>(null)
+const releaseTitleInput = ref<HTMLInputElement | null>(null)
+const releaseDialogId = ref<string | null>(null)
+const releaseTitle = ref('')
+const releaseWeekStart = ref('')
+const releasePreprodKey = ref('')
+const releaseProdKey = ref('')
+
+const dialogPreprodKey = computed(() => normalizeJiraKey(releasePreprodKey.value))
+const dialogProdKey = computed(() => normalizeJiraKey(releaseProdKey.value))
+
+function openReleaseDialog(releaseId: string) {
+  const rel = findRelease(releaseId)
+  if (!rel) return
+  releaseDialogId.value = rel.id
+  releaseTitle.value = rel.title
+  releaseWeekStart.value = rel.weekStart
+  releasePreprodKey.value = rel.preprodKey || ''
+  releaseProdKey.value = rel.prodKey || ''
+  nextTick(() => {
+    releaseDialogEl.value?.showModal()
+    releaseTitleInput.value?.focus()
+    releaseTitleInput.value?.select()
+  })
+}
+
+function closeReleaseDialog() {
+  releaseDialogEl.value?.close()
+}
+
+function onReleaseDialogClose() {
+  releaseDialogId.value = null
+  releaseTitle.value = ''
+  releaseWeekStart.value = ''
+  releasePreprodKey.value = ''
+  releaseProdKey.value = ''
+}
+
+async function saveReleaseFromDialog() {
+  if (!releaseDialogId.value) return
+  await saveRelease(
+    releaseDialogId.value,
+    releaseTitle.value,
+    releaseWeekStart.value,
+    releasePreprodKey.value,
+    releaseProdKey.value
+  )
+  closeReleaseDialog()
+}
+
+async function deleteReleaseFromDialog() {
+  if (!releaseDialogId.value) return
+  const id = releaseDialogId.value
+  closeReleaseDialog()
+  await deleteRelease(id)
 }
 
 /* ── Column dialog ─────────────────────────────────────────────────────────── */
@@ -1060,6 +1353,34 @@ function onDocumentMousedown(event: MouseEvent) {
   }
 }
 
+const boardEl = ref<HTMLElement | null>(null)
+
+/** Vertical mousewheel pans the board horizontally (down → right, up → left). */
+function onBoardWheel(event: WheelEvent) {
+  if (event.ctrlKey || event.metaKey) return
+  const el = boardEl.value
+  if (!el || el.scrollWidth <= el.clientWidth + 1) return
+
+  // Prefer native horizontal gestures (trackpad / shift+wheel).
+  const delta =
+    Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      ? event.deltaX
+      : event.deltaY
+  if (!delta) return
+
+  const max = el.scrollWidth - el.clientWidth
+  const next = Math.min(max, Math.max(0, el.scrollLeft + delta))
+  if (next === el.scrollLeft) return
+
+  el.scrollLeft = next
+  event.preventDefault()
+}
+
+watch(boardEl, (el, prev) => {
+  prev?.removeEventListener('wheel', onBoardWheel)
+  el?.addEventListener('wheel', onBoardWheel, { passive: false })
+})
+
 onMounted(() => {
   document.addEventListener('mousedown', onDocumentMousedown)
   loadBoard()
@@ -1067,6 +1388,9 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('mousedown', onDocumentMousedown)
+  document.removeEventListener('dragover', onDocumentDragOver)
+  stopEdgeScroll()
+  boardEl.value?.removeEventListener('wheel', onBoardWheel)
 })
 </script>
 
@@ -1088,6 +1412,13 @@ onBeforeUnmount(() => {
           spellcheck="false"
         />
       </label>
+      <button
+        class="btn"
+        :class="{ 'btn-active': releasesOpen }"
+        :aria-expanded="releasesOpen"
+        aria-controls="releases-panel"
+        @click="toggleReleasesPanel"
+      >Releases</button>
       <button class="btn btn-primary" @click="openColumnDialog(null)">+ Add Column</button>
       <button
         class="btn-icon board-menu-btn"
@@ -1105,10 +1436,122 @@ onBeforeUnmount(() => {
     <button class="btn-icon" title="Dismiss" @click="error = null">&times;</button>
   </div>
 
+  <section
+    v-if="releasesOpen && !loading"
+    id="releases-panel"
+    class="releases-panel"
+    aria-label="Release folders"
+  >
+    <div class="releases-panel-header">
+      <div>
+        <h2>Releases</h2>
+        <p class="releases-panel-hint">
+          Drag cards into a folder. Preprod update {{ PREPROD_HINT }} · Prod go-live {{ PROD_HINT }}
+        </p>
+      </div>
+      <button class="btn btn-primary" type="button" @click="addRelease">+ New release</button>
+    </div>
+    <div class="releases-row">
+      <article
+        v-for="rel in board.releases"
+        :key="rel.id"
+        class="release-folder"
+        :class="{ 'drop-target': releaseDropTarget === rel.id }"
+        @dragover="onReleaseDragOver($event, rel.id)"
+        @dragleave="onReleaseDragLeave"
+        @drop="onReleaseDrop($event, rel.id)"
+      >
+        <div class="release-folder-header">
+          <div class="release-folder-title-row">
+            <h3 class="release-folder-title" :title="rel.title">{{ rel.title }}</h3>
+            <span class="release-folder-count">{{ rel.cards.length }}</span>
+            <button
+              type="button"
+              class="btn-icon"
+              title="Edit release"
+              aria-label="Edit release"
+              @click="openReleaseDialog(rel.id)"
+            >✎</button>
+          </div>
+          <div class="release-schedule">
+            <div class="release-schedule-row">
+              <span class="release-env">Preprod</span>
+              <span class="release-when">{{ formatWeekDay(rel.weekStart, 0) }} · {{ rel.preprodSchedule }}</span>
+              <a
+                v-if="rel.preprodKey"
+                class="release-ticket"
+                :href="jiraBrowseUrl(rel.preprodKey)"
+                :title="'Open preprod ' + rel.preprodKey"
+                target="_blank"
+                rel="noopener noreferrer"
+                @click.stop
+              >{{ rel.preprodKey }}</a>
+              <button
+                v-else
+                type="button"
+                class="release-ticket release-ticket-missing"
+                @click="openReleaseDialog(rel.id)"
+              >Link ticket</button>
+            </div>
+            <div class="release-schedule-row">
+              <span class="release-env release-env-prod">Prod</span>
+              <span class="release-when">{{ formatWeekDay(rel.weekStart, 1) }} · {{ rel.prodSchedule }}</span>
+              <a
+                v-if="rel.prodKey"
+                class="release-ticket"
+                :href="jiraBrowseUrl(rel.prodKey)"
+                :title="'Open CM ' + rel.prodKey"
+                target="_blank"
+                rel="noopener noreferrer"
+                @click.stop
+              >{{ rel.prodKey }}</a>
+              <button
+                v-else
+                type="button"
+                class="release-ticket release-ticket-missing"
+                @click="openReleaseDialog(rel.id)"
+              >Link CM</button>
+            </div>
+          </div>
+        </div>
+        <ul class="release-cards">
+          <li
+            v-for="card in rel.cards"
+            :key="card.id"
+            class="release-card"
+          >
+            <button
+              type="button"
+              class="release-card-open"
+              @click="openCardDialog(card.columnId, card.id)"
+            >
+              <span v-if="card.ref" class="card-ref">{{ card.ref }}</span>
+              <span class="release-card-title">{{ card.title }}</span>
+            </button>
+            <button
+              type="button"
+              class="btn-icon release-card-remove"
+              title="Remove from release"
+              aria-label="Remove from release"
+              @click="removeCardFromRelease(rel.id, card.id)"
+            >&times;</button>
+          </li>
+          <li v-if="rel.cards.length === 0" class="release-empty">
+            {{ dragged ? 'Drop card here' : 'Drop cards here' }}
+          </li>
+        </ul>
+      </article>
+      <div v-if="board.releases.length === 0" class="releases-empty-state">
+        No releases yet. Create one for the next Monday / Tuesday window.
+      </div>
+    </div>
+  </section>
+
   <main v-if="loading" class="board-loading">Loading board…</main>
 
   <main
     v-else
+    ref="boardEl"
     class="board"
     aria-label="Kanban board"
     @dragover.prevent="onBoardDragOver"
@@ -1171,6 +1614,13 @@ onBeforeUnmount(() => {
                 rel="noopener noreferrer"
                 @click.stop
               >{{ card.jiraKey }}</a>
+              <button
+                v-if="card.releaseId && releaseTitleForCard(card)"
+                type="button"
+                class="card-release"
+                :title="'In release: ' + releaseTitleForCard(card)"
+                @click.stop="releasesOpen = true"
+              >{{ releaseTitleForCard(card) }}</button>
               <span
                 v-if="showCardDue(card)"
                 class="card-due"
@@ -1368,6 +1818,87 @@ onBeforeUnmount(() => {
         <span class="spacer"></span>
         <button type="button" class="btn" @click="closeCardDialog">Cancel</button>
         <button type="button" class="btn btn-primary" @click="saveCardFromDialog">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Release dialog -->
+  <dialog ref="releaseDialogEl" class="release-dialog" @close="onReleaseDialogClose">
+    <form method="dialog" class="dialog-form" @submit.prevent="saveReleaseFromDialog">
+      <h2>Edit release</h2>
+      <label>
+        Title
+        <input
+          ref="releaseTitleInput"
+          v-model="releaseTitle"
+          type="text"
+          maxlength="80"
+          placeholder="Release name"
+          autocomplete="off"
+          @keydown.enter.prevent="saveReleaseFromDialog"
+        />
+      </label>
+      <label>
+        Week (Monday)
+        <input
+          v-model="releaseWeekStart"
+          type="date"
+          class="due-input"
+          title="Monday of the release week — preprod that evening, prod next day"
+        />
+      </label>
+      <p class="release-dialog-schedule">
+        Preprod {{ PREPROD_HINT }} · Prod {{ PROD_HINT }}
+      </p>
+      <div class="release-dialog-tickets">
+        <div>
+          <div class="card-dialog-field-heading">
+            <label for="release-preprod-key">Preprod release</label>
+            <a
+              v-if="dialogPreprodKey"
+              class="card-dialog-jira-open"
+              :href="jiraBrowseUrl(dialogPreprodKey)"
+              target="_blank"
+              rel="noopener noreferrer"
+            >Open in Jira</a>
+          </div>
+          <input
+            id="release-preprod-key"
+            v-model="releasePreprodKey"
+            type="text"
+            maxlength="200"
+            placeholder="Jira key or browse URL"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+        <div>
+          <div class="card-dialog-field-heading">
+            <label for="release-prod-key">Prod CM ticket</label>
+            <a
+              v-if="dialogProdKey"
+              class="card-dialog-jira-open"
+              :href="jiraBrowseUrl(dialogProdKey)"
+              target="_blank"
+              rel="noopener noreferrer"
+            >Open in Jira</a>
+          </div>
+          <input
+            id="release-prod-key"
+            v-model="releaseProdKey"
+            type="text"
+            maxlength="200"
+            placeholder="CM ticket key or browse URL"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-danger" @click="deleteReleaseFromDialog">Delete</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn" @click="closeReleaseDialog">Cancel</button>
+        <button type="button" class="btn btn-primary" @click="saveReleaseFromDialog">Save</button>
       </div>
     </form>
   </dialog>
