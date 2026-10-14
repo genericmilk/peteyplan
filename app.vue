@@ -1401,24 +1401,55 @@ function onDocumentMousedown(event: MouseEvent) {
 
 const boardEl = ref<HTMLElement | null>(null)
 
-/** Vertical mousewheel pans the board horizontally (down → right, up → left). */
+/** After scrolling a column, keep horizontal pan locked briefly so overscroll doesn't jump sideways. */
+const COLUMN_SCROLL_UNLOCK_MS = 250
+let columnScrollLockUntil = 0
+
+/**
+ * Wheel over a column scrolls that column vertically first.
+ * Horizontal board pan unlocks 250ms after the last column scroll movement
+ * (or immediately when not mid-column-scroll / outside a scrollable column).
+ */
 function onBoardWheel(event: WheelEvent) {
   if (event.ctrlKey || event.metaKey) return
-  const el = boardEl.value
-  if (!el || el.scrollWidth <= el.clientWidth + 1) return
+  const board = boardEl.value
+  if (!board) return
 
-  // Prefer native horizontal gestures (trackpad / shift+wheel).
-  const delta =
-    Math.abs(event.deltaX) > Math.abs(event.deltaY)
-      ? event.deltaX
-      : event.deltaY
+  const dominantHorizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY)
+  const now = performance.now()
+
+  // Prefer scrolling the column under the cursor before panning the board.
+  if (!dominantHorizontal && event.deltaY) {
+    const column = (event.target as HTMLElement | null)?.closest?.(
+      '.column:not(.column-placeholder)'
+    ) as HTMLElement | null
+    const cards = column?.querySelector('.column-cards') as HTMLElement | null
+    if (cards && cards.scrollHeight > cards.clientHeight + 1) {
+      const maxTop = cards.scrollHeight - cards.clientHeight
+      const nextTop = Math.min(maxTop, Math.max(0, cards.scrollTop + event.deltaY))
+      if (nextTop !== cards.scrollTop) {
+        cards.scrollTop = nextTop
+        columnScrollLockUntil = now + COLUMN_SCROLL_UNLOCK_MS
+        event.preventDefault()
+        return
+      }
+      // At the column end — hold horizontal until the lock expires.
+      if (now < columnScrollLockUntil) {
+        event.preventDefault()
+        return
+      }
+    }
+  }
+
+  if (board.scrollWidth <= board.clientWidth + 1) return
+  const delta = dominantHorizontal ? event.deltaX : event.deltaY
   if (!delta) return
 
-  const max = el.scrollWidth - el.clientWidth
-  const next = Math.min(max, Math.max(0, el.scrollLeft + delta))
-  if (next === el.scrollLeft) return
+  const max = board.scrollWidth - board.clientWidth
+  const next = Math.min(max, Math.max(0, board.scrollLeft + delta))
+  if (next === board.scrollLeft) return
 
-  el.scrollLeft = next
+  board.scrollLeft = next
   event.preventDefault()
 }
 
