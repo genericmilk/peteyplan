@@ -566,6 +566,7 @@ button.release-ticket {
 
 /* Card */
 .card {
+  position: relative;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -576,6 +577,18 @@ button.release-ticket {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.card-unopened {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--bg);
+  pointer-events: none;
 }
 
 .card:hover {

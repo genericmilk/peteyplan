@@ -46,7 +46,8 @@ db.exec(`
     progress      TEXT NOT NULL DEFAULT 'todo',
     position      INTEGER NOT NULL DEFAULT 0,
     completed_at  TEXT,
-    archived_at   TEXT
+    archived_at   TEXT,
+    viewed_at     TEXT
   );
 
   CREATE TABLE IF NOT EXISTS releases (
@@ -87,6 +88,10 @@ if (!cardColumnNames.has('archived_at')) {
 }
 if (!cardColumnNames.has('release_id')) {
   db.exec(`ALTER TABLE cards ADD COLUMN release_id TEXT`)
+}
+if (!cardColumnNames.has('viewed_at')) {
+  // NULL = unopened since creation (or since this migration for pre-existing cards).
+  db.exec(`ALTER TABLE cards ADD COLUMN viewed_at TEXT`)
 }
 if (!cardColumnNames.has('number')) {
   db.exec(`ALTER TABLE cards ADD COLUMN number INTEGER`)
@@ -177,6 +182,8 @@ export interface Card {
   completedAt: string | null
   /** ISO datetime when soft-archived, or null */
   archivedAt: string | null
+  /** ISO datetime when first opened in the UI, or null if never viewed */
+  viewedAt: string | null
   columnId: string
   /** Assigned release folder id, or null */
   releaseId: string | null
@@ -223,6 +230,7 @@ interface CardRow {
   completed_at: string | null
   archived_at: string | null
   release_id: string | null
+  viewed_at: string | null
 }
 
 /** Prefix for user-facing card refs (`PP-12`). */
@@ -294,6 +302,7 @@ function toCard(row: CardRow): Card {
     progress: normalizeProgress(row.progress, kind),
     completedAt: row.completed_at || null,
     archivedAt: row.archived_at || null,
+    viewedAt: row.viewed_at || null,
     columnId: row.column_id,
     releaseId: row.release_id || null,
   }
@@ -404,7 +413,7 @@ export function getBoard(): { columns: Column[]; releases: Release[] } {
   const cards = db
     .prepare(
       `SELECT id, column_id, number, title, description, jira_key, due_by, kind, progress, position,
-              completed_at, archived_at, release_id
+              completed_at, archived_at, release_id, viewed_at
        FROM cards
        WHERE archived_at IS NULL
        ORDER BY ${CARD_ORDER_SQL}`
@@ -455,7 +464,7 @@ export function getReleases(cardById?: Map<string, Card>): Release[] {
     const cards = db
       .prepare(
         `SELECT id, column_id, number, title, description, jira_key, due_by, kind, progress, position,
-                completed_at, archived_at, release_id
+                completed_at, archived_at, release_id, viewed_at
          FROM cards
          WHERE archived_at IS NULL AND release_id IS NOT NULL
          ORDER BY ${CARD_ORDER_SQL}`
@@ -569,7 +578,7 @@ export function getArchivedCards(): ArchivedCard[] {
   const rows = db
     .prepare(
       `SELECT c.id, c.column_id, c.number, c.title, c.description, c.jira_key, c.due_by, c.kind, c.progress,
-              c.position, c.completed_at, c.archived_at, c.release_id, col.title AS column_title
+              c.position, c.completed_at, c.archived_at, c.release_id, c.viewed_at, col.title AS column_title
        FROM cards c
        LEFT JOIN columns col ON col.id = c.column_id
        WHERE c.archived_at IS NOT NULL
@@ -646,7 +655,9 @@ export function addCard(
   jiraKey = '',
   dueBy = '',
   progress: ProgressId = DEFAULT_PROGRESS,
-  kind: KindId = DEFAULT_KIND
+  kind: KindId = DEFAULT_KIND,
+  /** When true (UI create), card starts viewed so no unread dot. MCP/API leave null. */
+  markViewed = false
 ): CardRow | undefined {
   if (!getColumn(columnId)) return undefined
   const position =
@@ -659,6 +670,7 @@ export function addCard(
   const normalizedKind = normalizeKind(kind)
   const normalizedProgress = normalizeProgress(progress, normalizedKind)
   const completed_at = normalizedProgress === 'done' ? nowIso() : null
+  const viewed_at = markViewed ? nowIso() : null
   const card: CardRow = {
     id: uid('card'),
     column_id: columnId,
@@ -673,11 +685,12 @@ export function addCard(
     completed_at,
     archived_at: null,
     release_id: null,
+    viewed_at,
   }
   db.prepare(
     `INSERT INTO cards
-     (id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at, release_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at, release_id, viewed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     card.id,
     card.column_id,
@@ -691,7 +704,8 @@ export function addCard(
     card.position,
     card.completed_at,
     card.archived_at,
-    card.release_id
+    card.release_id,
+    card.viewed_at
   )
   rerankColumnByDue(columnId)
   const ranked = db.prepare('SELECT * FROM cards WHERE id = ?').get(card.id) as CardRow
@@ -709,6 +723,8 @@ export function updateCard(
     progress?: ProgressId
     column_id?: string
     releaseId?: string | null
+    /** Set true to mark the card as viewed */
+    viewed?: boolean
   }
 ): CardRow | undefined {
   const existing = db.prepare('SELECT * FROM cards WHERE id = ?').get(id) as CardRow | undefined
@@ -732,11 +748,13 @@ export function updateCard(
     if (changes.releaseId && !getRelease(changes.releaseId)) return undefined
     release_id = changes.releaseId
   }
+  const viewed_at =
+    changes.viewed === true && !existing.viewed_at ? nowIso() : existing.viewed_at
   db.prepare(
     `UPDATE cards
-     SET title = ?, description = ?, jira_key = ?, due_by = ?, kind = ?, progress = ?, completed_at = ?, release_id = ?
+     SET title = ?, description = ?, jira_key = ?, due_by = ?, kind = ?, progress = ?, completed_at = ?, release_id = ?, viewed_at = ?
      WHERE id = ?`
-  ).run(title, description, jira_key, due_by, kind, progress, completed_at, release_id, id)
+  ).run(title, description, jira_key, due_by, kind, progress, completed_at, release_id, viewed_at, id)
 
   rerankColumnByDue(existing.column_id)
   return db.prepare('SELECT * FROM cards WHERE id = ?').get(id) as CardRow

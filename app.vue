@@ -26,6 +26,8 @@ interface Card {
   kind?: KindId
   progress?: ProgressId
   completedAt?: string | null
+  /** ISO datetime when opened in the UI; null/undefined = unopened (show unread dot) */
+  viewedAt?: string | null
   releaseId?: string | null
 }
 interface Column { id: string; title: string; cards: Card[] }
@@ -627,9 +629,10 @@ async function saveCard(
         body: JSON.stringify(payload),
       })
     } else {
+      // Created from the dialog — already viewed by the user.
       await api('/api/cards', {
         method: 'POST',
-        body: JSON.stringify({ columnId, ...payload }),
+        body: JSON.stringify({ columnId, ...payload, markViewed: true }),
       })
     }
     await refreshBoard()
@@ -1076,6 +1079,26 @@ function onDescViewKeydown(event: KeyboardEvent) {
   startDescEdit()
 }
 
+/** Clear the unread indicator when a card is opened. */
+async function markCardViewed(card: Card) {
+  if (card.viewedAt) return
+  const viewedAt = new Date().toISOString()
+  card.viewedAt = viewedAt
+  // Keep release-panel copies in sync with the board card.
+  for (const rel of board.value.releases) {
+    const copy = rel.cards.find((c) => c.id === card.id)
+    if (copy) copy.viewedAt = viewedAt
+  }
+  try {
+    await api(`/api/cards/${card.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ viewed: true }),
+    })
+  } catch (err) {
+    fail(err)
+  }
+}
+
 function openCardDialog(columnId: string, cardId: string | null) {
   cardDialogColumnId.value = columnId
   cardDialogCardId.value = cardId
@@ -1091,6 +1114,7 @@ function openCardDialog(columnId: string, cardId: string | null) {
     cardProgressStage.value = normalizeProgress(card.progress, cardKindId.value)
     cardDeleteVisible.value = true
     descEditing.value = false
+    void markCardViewed(card)
   } else {
     cardDialogTitle.value = 'New card'
     cardDialogRef.value = ''
@@ -1680,6 +1704,12 @@ onBeforeUnmount(() => {
             @dragstart="onCardDragStart($event, col.id, card)"
             @dragend="onCardDragEnd"
           >
+            <span
+              v-if="!card.viewedAt"
+              class="card-unopened"
+              title="New — not opened yet"
+              aria-label="New card, not opened yet"
+            ></span>
             <div class="card-meta">
               <span v-if="card.ref" class="card-ref" :title="'Card ' + card.ref">{{ card.ref }}</span>
               <a
