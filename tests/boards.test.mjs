@@ -165,3 +165,20 @@ test('normalizes untrusted checklist input', () => {
   assert.equal(new Set(items.map((item) => item.id)).size, 3)
   assert.equal(normalizeChecklist(Array.from({ length: 150 }, (_, i) => `Item ${i}`)).length, 100)
 })
+
+test('derives readable accent palettes from any board colour', async () => {
+  const { accentPalette, contrast, parseHex } = await import('../shared/accent.ts')
+  const surfaces = { dark: ['#1e222c', '#1a1d26'], light: ['#ffffff', '#eef0f5'] }
+  for (const color of ['#4f7cff', '#2fae74', '#e0863a', '#8b6cf0', '#f5d90a', '#ffffff', '#000000', '#ff2d55', '#5b8cff']) {
+    for (const theme of ['dark', 'light']) {
+      const palette = accentPalette(color, theme)
+      const c = (name) => parseHex(palette[name])
+      assert.ok(contrast(c('--accent-fill'), c('--on-accent')) >= 4.5, `${color} ${theme} button text`)
+      for (const surface of surfaces[theme]) {
+        assert.ok(contrast(c('--accent'), parseHex(surface)) >= 4.5, `${color} ${theme} accent on ${surface}`)
+        assert.ok(contrast(c('--brand-ink'), parseHex(surface)) >= 3, `${color} ${theme} logo on ${surface}`)
+      }
+    }
+  }
+  assert.equal(accentPalette('not a colour', 'dark'), null)
+})
