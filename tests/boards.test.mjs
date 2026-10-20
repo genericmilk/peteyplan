@@ -110,7 +110,7 @@ test('boards preserve data, isolate content and transfer items safely', async (t
     assert.equal(db.transferBoardItem(other.id, empty.id, 'card', 'missing-card'), false)
     assert.equal(db.getBoard(empty.id).columns.length, 0)
     assert.equal(db.transferBoardItem(other.id, empty.id, 'card', card.id), true)
-    assert.equal(db.getBoard(empty.id).columns[0].title, 'To Do')
+    assert.equal(db.getBoard(empty.id).columns[0].title, db.UNTITLED_COLUMN_TITLE)
     assert.equal(db.getBoard(empty.id).columns[0].cards[0].id, card.id)
   })
 
@@ -181,4 +181,18 @@ test('derives readable accent palettes from any board colour', async () => {
     }
   }
   assert.equal(accentPalette('not a colour', 'dark'), null)
+})
+
+test('dropping a card past the last column creates a new Untitled column', () => {
+  const from = db.createBoard('From', '📤', '#3366ff')
+  const to = db.createBoard('To', '📥', '#ff6633')
+  const source = db.addColumn('Source', from.id)
+  const existing = db.addColumn('Existing', to.id)
+  const card = db.addCard(source.id, 'New home', '')
+  assert.equal(db.transferBoardItem(from.id, to.id, 'card', card.id), 'missing-target-column')
+  assert.equal(db.transferBoardItem(from.id, to.id, 'card', card.id, existing.id, 0, true), true)
+  assert.deepEqual(db.getBoard(to.id).columns.map((col) => [col.title, col.cards.map((c) => c.title)]), [
+    ['Existing', []],
+    [db.UNTITLED_COLUMN_TITLE, ['New home']],
+  ])
 })

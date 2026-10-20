@@ -118,15 +118,16 @@ Return to the latest version with `git checkout main && git pull`.
 - Hover the board list or focus a pill to reveal every name. Inactive pills are greyscale, showing 50% colour on hover. When the list overflows, wheel up scrolls left and wheel down scrolls right, with the scrollbar hidden.
 - Drag-and-drop columns and cards. Cards dropped into **Done** are marked complete and auto-archive after 5 days.
 - Every card gets a stable reference like `PP-12` that works in the UI, API and MCP tools.
+- **Copy link** in a card's dialog puts a share link on your clipboard to send over chat. The card itself is packed into the link (after the `#`, so it never reaches a server), and opening it in anyone's PeteyPlan offers to add a copy to their chosen board and column. Links point at your own address (usually `localhost:3000`), so someone running on a different port has to change that part.
 - Optional description (Markdown), Jira key and due date. Sooner due dates float to the top; overdue and due-today dates are highlighted.
 - **Checklists** inside cards: tick items on the card, quick-add from the card footer, or edit and reorder them in the card dialog.
-- Work types (development, chore, managing) with their own progress stages, shown as a stage track. Hover a segment to see the stage, click to set it.
+- Work types with their own progress stages, shown as a stage track. Hover a segment to see the stage, click to set it. Development task, Chore and Managing someone come built in. Rename, reorder, add or remove types and their stages under **Settings → Work types**. Every type runs from Todo to Done; cards on a removed stage step back to the one before it, and cards of a removed type move to the first type.
 - **Release folders** group cards into a weekly release with preprod and prod Jira tickets.
 - Soft-delete to an archive you can restore from. An unread dot marks cards nobody has opened yet.
 
 **Built for speed**
 - Add cards inline at the bottom of a column: type, press <kbd>Enter</kbd>, keep going.
-- Press <kbd>/</kbd> to filter every card on the board by title, description, Jira key, stage or checklist item.
+- Press <kbd>⌘K</kbd> on Mac, <kbd>Ctrl</kbd>+<kbd>K</kbd> elsewhere, or <kbd>/</kbd> to open the command palette. It searches cards on every board (archived ones too) by title, ref, description, Jira key, column, stage or checklist item. It also finds boards and columns, and runs actions such as new card, new column, archive, releases, theme and settings. Pick **Filter this board** to keep only matching cards on screen, and clear the filter from the chip in the top bar.
 - Jira keys like `CX-1831` link straight to the issue wherever they appear.
 
 **Looks the way you like**
@@ -140,11 +141,11 @@ Return to the latest version with `git checkout main && git pull`.
 
 | Tools | |
 | ----- | - |
-| Boards | `get_boards`, `get_board`, `get_columns`, `get_cards` |
+| Boards | `get_boards`, `get_board`, `get_columns`, `get_cards`, `get_work_types` |
 | Cards | `add_card`, `update_card`, `delete_card`, `move_card` |
 | Columns | `add_column`, `rename_column`, `delete_column`, `clear_column_cards`, `reorder_columns` |
 
-Board reads, `move_card`, `add_column` and `reorder_columns` take an optional `boardId` (omit it for the default board). `add_card` and `update_card` accept a `checklist`. Set `PETEYPLAN_API_URL` if the app isn't at `http://localhost:3000`.
+Board reads, `move_card`, `add_column` and `reorder_columns` take an optional `boardId` (omit it for the default board). `add_card` and `update_card` accept a `checklist`, and take `kind` and `progress` as an id or name from `get_work_types`. Set `PETEYPLAN_API_URL` if the app isn't at `http://localhost:3000`.
 
 <details>
 <summary><strong>OpenCode</strong></summary>
@@ -191,6 +192,9 @@ Card routes accept either a card ID or a `PP-n` ref. Routes marked † take an o
 | DELETE | `/api/columns/:id` | |
 | DELETE | `/api/columns/:id/cards` | Archives every card in the column |
 | POST | `/api/columns/reorder` † | `{ orderedIds }` |
+| GET | `/api/search` | Every column and card on every board, archived cards included (powers the command palette) |
+| GET | `/api/kinds` | Work types and their stages |
+| PUT | `/api/kinds` | `{ kinds: [{ id?, label, stages: [{ id?, label }] }] }`, replacing the whole list. `stages` are the ones between Todo and Done |
 | POST | `/api/cards` | `{ columnId, title, description?, jiraKey?, dueBy?, kind?, progress?, checklist? }` |
 | PATCH | `/api/cards/:id` | `{ title?, description?, jiraKey?, dueBy?, kind?, progress?, checklist? }` |
 | DELETE | `/api/cards/:id` | Soft-archives the card |
@@ -207,7 +211,7 @@ Card routes accept either a card ID or a `PP-n` ref. Routes marked † take an o
 
 A `checklist` is an array of `{ id?, text, done? }`. Sending one replaces the card's whole list; keep existing `id`s to preserve items.
 
-Moving a card between boards keeps its ID and number and drops its release. Moving a column carries its archived cards too. Dropping a card on an empty board creates a **To Do** column for it.
+You can also move a card with the **Board** and **Column** selectors in its dialog. Pick **+ New column** to give it a fresh Untitled column. Moving a card between boards keeps its ID and number and drops its release. Moving a column carries its archived cards too. Dropping a card on an empty board, or in the space after the last column, creates an **Untitled column** for it (a dashed preview shows where it will go), and the app then asks you to name it.
 </details>
 
 ## Development
@@ -236,6 +240,7 @@ Without Docker the database is created at `./data/peteyplan.db` (gitignored). Po
 - `columns(id, board_id, title, position)`
 - `cards(id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at, release_id, viewed_at, checklist)`
 - `releases(id, board_id, title, week_start, preprod_key, prod_key, position)`
+- `work_types(id, label, stages, position)`, where `stages` is JSON and includes Todo and Done
 - `card_counter(id, next)` hands out `PP-n` numbers, which are never reused
 
 No database files are committed, so a fresh clone always starts with an empty board.

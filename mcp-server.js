@@ -60,6 +60,10 @@ server.tool("get_boards", "List boards, including their IDs, emoji and colours",
   return { content: [{ type: "text", text: boardText(await api("/api/boards")) }] };
 });
 
+server.tool("get_work_types", "List card work types and the progress stages each one uses (ids and labels)", {}, async () => {
+  return { content: [{ type: "text", text: boardText(await api("/api/kinds")) }] };
+});
+
 server.tool("get_board", "Get the full Kanban board with all columns and cards", { boardId: boardIdInput }, async ({ boardId }) => {
   const board = await api(boardPath(boardId));
   return { content: [{ type: "text", text: boardText(board) }] };
@@ -101,13 +105,13 @@ server.tool(
       .optional()
       .describe("Due date as YYYY-MM-DD (optional). Sooner dues float higher in the column."),
     kind: z
-      .enum(["development", "chore", "managing"])
+      .string()
       .optional()
-      .describe("Work type (optional; defaults to development). Changes which progress pills apply."),
+      .describe("Work type id or name from get_work_types (optional; defaults to the first type). Changes which progress pills apply."),
     progress: z
-      .enum(["todo", "building", "review", "deploy", "qa", "doing", "waiting", "followup", "done"])
+      .string()
       .optional()
-      .describe("Progress stage for the card's work type (optional; defaults to todo)"),
+      .describe("Progress stage id or name for the card's work type, see get_work_types (optional; defaults to todo)"),
     checklist: z
       .array(z.object({
         id: z.string().optional().describe("Existing item ID (keep to preserve the item)"),
@@ -126,8 +130,8 @@ server.tool(
         description: description || "",
         jiraKey: jiraKey || "",
         dueBy: dueBy || "",
-        kind: kind || "development",
-        progress: progress || "todo",
+        ...(kind ? { kind } : {}),
+        ...(progress ? { progress } : {}),
         checklist: checklist || [],
       }),
     });
@@ -152,13 +156,13 @@ server.tool(
       .optional()
       .describe("New due date YYYY-MM-DD (omit to keep current; empty string clears it)"),
     kind: z
-      .enum(["development", "chore", "managing"])
+      .string()
       .optional()
-      .describe("Work type: development, chore, or managing (changes status pills)"),
+      .describe("Work type id or name from get_work_types (changes status pills)"),
     progress: z
-      .enum(["todo", "building", "review", "deploy", "qa", "doing", "waiting", "followup", "done"])
+      .string()
       .optional()
-      .describe("Progress stage for the card's work type"),
+      .describe("Progress stage id or name for the card's work type, see get_work_types"),
     checklist: z
       .array(z.object({
         id: z.string().optional().describe("Existing item ID (keep to preserve the item)"),
