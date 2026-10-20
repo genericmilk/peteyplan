@@ -1,38 +1,37 @@
-# PeteyPlan
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.png">
+    <img src="docs/logo-light.png" alt="PeteyPlan" width="96" height="96">
+  </picture>
+</p>
 
-A personal Kanban board — columns, cards, drag-and-drop — built as a **Nuxt + SQLite** web app and meant to run in **Docker**.
+<h1 align="center">PeteyPlan</h1>
 
-This replaced an earlier Electron app; that source is kept only locally (not in this repo).
+<p align="center">
+  A fast, self-hosted Kanban board for tracking your own work.<br>
+  Multiple boards, checklists, release folders and an MCP server, in one small Docker container.
+</p>
 
-## Features
+<p align="center">
+  <a href="#install-with-docker">Install</a> ·
+  <a href="#updating">Update</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#mcp-server">MCP</a> ·
+  <a href="#http-api">API</a>
+</p>
 
-- Multiple independent boards with coloured emoji pills beside the logo; hover or focus a pill to reveal its name
-- Manage board names, emojis and colours in **Board options → Settings**; the initial **Default Board** can be renamed but cannot be deleted
-- Board emojis use a floating, searchable, categorised picker (`vue3-emoji-picker`) that closes on blur or outside click, with native emoji rendering and locally bundled emoji data
-- Hover over a board pill while dragging to switch boards, then drop a card into a destination column or a column anywhere on the board
-- Drop directly onto a pill to append a column or move a card into its first column; an empty board gets a **To Do** column for a dropped card
-- Horizontal board-switch pan showing intervening boards whipping past (respects reduced-motion preferences), and remembered active board on this browser
-- Columns and cards with drag-and-drop reordering
-- Cards carry a stable number shown as `PP-n` (e.g. `PP-12`); refs work in the API and MCP tools anywhere a card ID does
-- Optional card **description**, **Jira key**, and **due date**
-- Card **checklists**: tick items right on the card, quick-add from the card's ☑+ button, collapse the list, and edit/reorder items in the card dialog (search matches item text; MCP `add_card`/`update_card` accept `checklist`)
-- Frosted-glass interface over an ambient backdrop lit by the active board's colour; Geist type and Phosphor icons
-- Cards show progress as a compact stage track (click a segment to set the stage); add cards inline at the bottom of a column (Enter adds, the box stays open for the next one, "Add details" opens the full dialog)
-- **Settings > Appearance**: Day / Night / System theme (also a sun/moon toggle in the top bar), Glass / Solid surfaces, transition speed (Snappy, Normal, Relaxed, Off), and Comfortable / Compact density, saved per browser
-- Press `/` to jump to the task filter; `Esc` clears it
-- Work **kind** (development / chore / managing) with kind-specific progress stages
-- Due dates auto-rank cards (sooner dues nearer the top)
-- Soft-archive (including auto-archive of Done cards after 5 days)
-- HTTP API + an MCP server so agents can drive the board
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="docs/screenshot-light.png">
+    <img src="docs/screenshot-dark.png" alt="PeteyPlan showing a Work board with Backlog, To Do, In Progress and Done columns" width="100%">
+  </picture>
+</p>
 
-## Requirements
+---
 
-| Mode | Needs |
-| ---- | ----- |
-| **Docker** (recommended) | [Docker](https://docs.docker.com/get-docker/) + Docker Compose |
-| **Local dev** | Node `^22.19 \|\| ^24.11 \|\| >=26` (Node 24 LTS recommended — see `.nvmrc`) |
+## Install with Docker
 
-## Quick start (Docker)
+You need [Docker](https://docs.docker.com/get-docker/) with Docker Compose (included in Docker Desktop).
 
 ```bash
 git clone https://github.com/pday-kyc360/peteyplan.git
@@ -40,66 +39,113 @@ cd peteyplan
 docker compose up -d --build
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open **[http://localhost:3000](http://localhost:3000)**.
 
-On first start the app creates a fresh SQLite database in the `peteyplan-data` Docker volume and seeds the default columns (**Backlog**, **To Do**, **In Progress**, **Done**). The volume keeps your board across restarts and rebuilds.
+On first start PeteyPlan creates a SQLite database in the `peteyplan-data` Docker volume and seeds a **Default Board** with **Backlog**, **To Do**, **In Progress** and **Done** columns. The container restarts automatically with Docker and has a built-in health check.
 
-```bash
-docker compose down          # stop; keep the board
-docker compose down -v       # stop and delete the board volume
+<details>
+<summary><strong>Run on a different port</strong></summary>
+
+Change the left-hand side of the `ports` mapping in `docker-compose.yml`, for example to serve on 8080:
+
+```yaml
+ports:
+  - "8080:3000"
 ```
 
-To publish on another host port (example: 8080), edit the `ports` mapping in `docker-compose.yml` to `"8080:3000"`, then recreate the container.
+Then apply it with `docker compose up -d`.
+</details>
 
-## Run locally (dev)
+## Updating
 
-```bash
-npm install
-npm run dev          # http://localhost:3000
-```
-
-The DB is created under `./data/peteyplan.db` by default (that directory is gitignored). Override with:
+Your board lives in the Docker volume, not the image, so updating never touches your data.
 
 ```bash
-DATA_DIR=/path/to/dir npm run dev
+cd peteyplan
+git pull
+docker compose up -d --build
 ```
 
-Production build + local preview:
+Database changes (new columns such as checklists) are applied automatically when the new version starts.
+
+<details>
+<summary><strong>Back up before updating (recommended)</strong></summary>
+
+Snapshot the data volume to a file in the current folder:
 
 ```bash
-npm run build
-npm run preview
+docker compose stop
+docker run --rm -v peteyplan_peteyplan-data:/data -v "$PWD":/backup alpine \
+  tar czf /backup/peteyplan-backup.tgz -C /data .
+docker compose start
 ```
 
-## Database
+Restore it (this replaces the current board):
 
-| Setting | Value |
-| ------- | ----- |
-| Engine | SQLite (`better-sqlite3`) |
-| File | `peteyplan.db` inside `DATA_DIR` |
-| Docker | `DATA_DIR=/data` → named volume `peteyplan-data` |
-| Local | `DATA_DIR` defaults to `./data` |
+```bash
+docker compose stop
+docker run --rm -v peteyplan_peteyplan-data:/data -v "$PWD":/backup alpine \
+  sh -c 'rm -rf /data/* && tar xzf /backup/peteyplan-backup.tgz -C /data'
+docker compose start
+```
+</details>
 
-**Nothing under `data/` or any `*.db` / `*.sqlite*` file is committed.** A clone + fresh Docker (or local) start always gets a new DB and the default seeded columns.
-Schema (simplified):
+<details>
+<summary><strong>Roll back to an earlier version</strong></summary>
 
-- `columns(id, title, position)`
-- `boards(id, name, emoji, color, position)` — existing columns and releases migrate to the protected default board
-- Columns and releases each carry a `board_id`; archives follow their column's board
-- `cards(id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at)`
-- `card_counter(id, next)` — monotonic allocator for card numbers (`PP-n` refs never reuse deleted numbers)
+```bash
+git log --oneline            # find the commit you want
+git checkout <commit>
+docker compose up -d --build
+```
 
-Jira keys (and pasted Atlassian browse URLs) deep-link to `https://kycglobal.atlassian.net/browse/<KEY>`. Keys mentioned in the title or description are also auto-linked.
+Return to the latest version with `git checkout main && git pull`.
+</details>
+
+### Everyday commands
+
+| Task | Command |
+| ---- | ------- |
+| Stop (keeps your board) | `docker compose down` |
+| Start again | `docker compose up -d` |
+| View logs | `docker compose logs -f` |
+| **Delete everything**, including your board | `docker compose down -v` |
+
+## Features
+
+**Boards and cards**
+- Multiple boards, each with its own emoji and colour. Click a pill in the top bar to switch, or hover a pill while dragging to carry a card or column across.
+- Drag-and-drop columns and cards. Cards dropped into **Done** are marked complete and auto-archive after 5 days.
+- Every card gets a stable reference like `PP-12` that works in the UI, API and MCP tools.
+- Optional description (Markdown), Jira key and due date. Sooner due dates float to the top; overdue and due-today dates are highlighted.
+- **Checklists** inside cards: tick items on the card, quick-add from the card footer, or edit and reorder them in the card dialog.
+- Work types (development, chore, managing) with their own progress stages, shown as a stage track. Hover a segment to see the stage, click to set it.
+- **Release folders** group cards into a weekly release with preprod and prod Jira tickets.
+- Soft-delete to an archive you can restore from. An unread dot marks cards nobody has opened yet.
+
+**Built for speed**
+- Add cards inline at the bottom of a column: type, press <kbd>Enter</kbd>, keep going.
+- Press <kbd>/</kbd> to filter every card on the board by title, description, Jira key, stage or checklist item.
+- Jira keys like `CX-1831` link straight to the issue wherever they appear.
+
+**Looks the way you like**
+- Frosted-glass interface lit by the active board's colour.
+- **Settings → Appearance**: Day, Night or System theme (or the sun/moon button), Glass or Solid surfaces, transition speed, and comfortable or compact density. Respects your OS reduced-motion and reduced-transparency settings.
 
 ## MCP server
 
-[`mcp-server.js`](mcp-server.js) exposes board tools over stdio and talks to the running web app over HTTP. Set `PETEYPLAN_API_URL` (default `http://localhost:3000`).
+[`mcp-server.js`](mcp-server.js) lets AI agents read and update your board. It runs over stdio and talks to the running app over HTTP, so start PeteyPlan first.
 
-**Tools:** `get_boards`, `get_board`, `get_columns`, `get_cards`, `add_card`, `update_card`, `delete_card`, `move_card`, `add_column`, `rename_column`, `delete_column`, `clear_column_cards`, `reorder_columns`.
+| Tools | |
+| ----- | - |
+| Boards | `get_boards`, `get_board`, `get_columns`, `get_cards` |
+| Cards | `add_card`, `update_card`, `delete_card`, `move_card` |
+| Columns | `add_column`, `rename_column`, `delete_column`, `clear_column_cards`, `reorder_columns` |
 
-Board reads, `move_card`, `add_column`, and `reorder_columns` accept an optional `boardId`; omit it for the default board. Card numbers remain globally unique across boards.
+Board reads, `move_card`, `add_column` and `reorder_columns` take an optional `boardId` (omit it for the default board). `add_card` and `update_card` accept a `checklist`. Set `PETEYPLAN_API_URL` if the app isn't at `http://localhost:3000`.
 
-### OpenCode
+<details>
+<summary><strong>OpenCode</strong></summary>
 
 ```json
 {
@@ -115,58 +161,101 @@ Board reads, `move_card`, `add_column`, and `reorder_columns` accept an optional
 ```
 
 A ready-made config lives in [`opencode.json`](opencode.json).
+</details>
 
-### Cursor
+<details>
+<summary><strong>Cursor, Claude Code and other MCP clients</strong></summary>
 
-Add an MCP server entry pointing at `node mcp-server.js` with `PETEYPLAN_API_URL` set to your running app (same as above). The app must be up (Docker or `npm run dev`) before MCP tools will work.
+Add a stdio server that runs `node /path/to/peteyplan/mcp-server.js` with `PETEYPLAN_API_URL` set to your running app. Run `npm install` in the repo once so the MCP SDK is available.
+</details>
 
-## API overview
+## HTTP API
+
+Card routes accept either a card ID or a `PP-n` ref. Routes marked † take an optional `?boardId=` and default to the default board.
+
+<details>
+<summary><strong>Route reference</strong></summary>
 
 | Method | Route | Body |
 | ------ | ----- | ---- |
-| GET | `/api/board` | — |
-| GET | `/api/boards` | — |
-| POST | `/api/boards` | `{ name, emoji?, color? }` — creates an empty board |
+| GET | `/api/boards` | |
+| POST | `/api/boards` | `{ name, emoji?, color? }` |
 | PATCH | `/api/boards/:id` | `{ name?, emoji?, color? }` |
-| DELETE | `/api/boards/:id` | — (permanently deletes contents; default board protected) |
+| DELETE | `/api/boards/:id` | Deletes the board and its contents (default board protected) |
 | POST | `/api/boards/:id/items` | `{ fromBoardId, type: "card" \| "column", itemId, targetColumnId?, targetPosition? }` |
-| GET | `/api/archive` | — |
-| POST | `/api/archive/restore` | `{ id, columnId? }` |
-| DELETE | `/api/archive/:id` | — (permanent delete) |
-| POST | `/api/columns` | `{ title }` |
+| GET | `/api/board` † | |
+| POST | `/api/columns` † | `{ title }` |
 | PATCH | `/api/columns/:id` | `{ title }` |
-| DELETE | `/api/columns/:id` | — |
-| DELETE | `/api/columns/:id/cards` | — (soft-archive all cards in column) |
-| POST | `/api/columns/reorder` | `{ orderedIds: string[] }` |
-| POST | `/api/cards` | `{ columnId, title, description?, jiraKey?, dueBy?, kind?, progress? }` |
-| PATCH | `/api/cards/:id` | `{ title?, description?, jiraKey?, dueBy?, kind?, progress? }` — `:id` accepts a card ID or `PP-n` ref |
-| DELETE | `/api/cards/:id` | — (soft-archive; `:id` accepts a card ID or `PP-n` ref) |
-| POST | `/api/cards/reorder` | `{ columnId, orderedIds: string[] }` — ids accept card IDs or `PP-n` refs |
+| DELETE | `/api/columns/:id` | |
+| DELETE | `/api/columns/:id/cards` | Archives every card in the column |
+| POST | `/api/columns/reorder` † | `{ orderedIds }` |
+| POST | `/api/cards` | `{ columnId, title, description?, jiraKey?, dueBy?, kind?, progress?, checklist? }` |
+| PATCH | `/api/cards/:id` | `{ title?, description?, jiraKey?, dueBy?, kind?, progress?, checklist? }` |
+| DELETE | `/api/cards/:id` | Soft-archives the card |
+| POST | `/api/cards/reorder` | `{ columnId, orderedIds }` |
+| GET | `/api/archive` † | |
+| POST | `/api/archive/restore` | `{ cardId, columnId? }` |
+| DELETE | `/api/archive/:id` | Permanently deletes an archived card |
+| GET | `/api/releases` † | |
+| POST | `/api/releases` † | `{ title?, weekStart?, preprodKey?, prodKey? }` |
+| PATCH | `/api/releases/:id` | `{ title?, weekStart?, preprodKey?, prodKey? }` |
+| DELETE | `/api/releases/:id` | Cards stay on the board |
+| POST | `/api/releases/:id/cards` | `{ cardId }` |
+| DELETE | `/api/releases/:id/cards/:cardId` | |
 
-`GET /api/board`, `GET /api/archive`, `GET /api/releases`, `POST /api/columns`, `POST /api/columns/reorder`, and `POST /api/releases` accept `?boardId=...`; omitting it keeps the original default-board behavior. Other item routes identify their board through the column, card or release ID.
+A `checklist` is an array of `{ id?, text, done? }`. Sending one replaces the card's whole list; keep existing `id`s to preserve items.
 
-Cross-board transfers preserve card IDs/numbers and remove release assignments from the source board. Moving a column carries both active and archived cards. Card transfers require a destination column unless the destination board is empty, when **To Do** is created automatically. Dropping into **Done** preserves the usual completion and auto-archive behavior.
+Moving a card between boards keeps its ID and number and drops its release. Moving a column carries its archived cards too. Dropping a card on an empty board creates a **To Do** column for it.
+</details>
 
-## Tests
+## Development
+
+Needs Node `^22.19`, `^24.11` or `>=26` (Node 24 LTS recommended, see `.nvmrc`).
 
 ```bash
-npm test             # Node 24+: migration, persistence, board isolation, transfers, default-board protection
-npm run build        # Production client and server build
+npm install
+npm run dev          # http://localhost:3000
+npm test             # migrations, persistence, boards, transfers, checklists
+npm run build        # production build
 ```
 
-## Project layout
+Without Docker the database is created at `./data/peteyplan.db` (gitignored). Point it elsewhere with `DATA_DIR=/path/to/dir`.
+
+<details>
+<summary><strong>Data and schema</strong></summary>
+
+| | |
+| - | - |
+| Engine | SQLite via `better-sqlite3`, WAL mode |
+| File | `peteyplan.db` inside `DATA_DIR` (`/data` in Docker, `./data` locally) |
+| Migrations | Applied automatically on startup; older databases are upgraded in place |
+
+- `boards(id, name, emoji, color, position)`
+- `columns(id, board_id, title, position)`
+- `cards(id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at, release_id, viewed_at, checklist)`
+- `releases(id, board_id, title, week_start, preprod_key, prod_key, position)`
+- `card_counter(id, next)` hands out `PP-n` numbers, which are never reused
+
+No database files are committed, so a fresh clone always starts with an empty board.
+</details>
+
+<details>
+<summary><strong>Project layout</strong></summary>
 
 ```
-├── app.vue              # Board UI
+├── app.vue                  # Board UI
+├── assets/css/main.css      # Visual system: tokens, glass surfaces, themes
+├── composables/             # Appearance preferences
+├── shared/                  # Progress stages and checklists (client + server)
 ├── server/
-│   ├── db.ts            # SQLite schema, seeding, queries
-│   └── api/             # Nitro API routes
-├── mcp-server.js        # MCP stdio server → HTTP API
-├── Dockerfile           # Multi-stage Nuxt build
-├── docker-compose.yml   # App + named data volume
-└── opencode.json        # Sample MCP config
+│   ├── db.ts                # SQLite schema, migrations, queries
+│   └── api/                 # Nitro API routes
+├── mcp-server.js            # MCP stdio server → HTTP API
+├── Dockerfile               # Multi-stage build
+└── docker-compose.yml       # App + named data volume
 ```
+</details>
 
 ## License
 
-Private — all rights reserved unless otherwise noted.
+Private. All rights reserved unless otherwise noted.
