@@ -15,6 +15,11 @@ This replaced an earlier Electron app; that source is kept only locally (not in 
 - Columns and cards with drag-and-drop reordering
 - Cards carry a stable number shown as `PP-n` (e.g. `PP-12`); refs work in the API and MCP tools anywhere a card ID does
 - Optional card **description**, **Jira key**, and **due date**
+- Card **checklists**: tick items right on the card, quick-add from the card's ☑+ button, collapse the list, and edit/reorder items in the card dialog (search matches item text; MCP `add_card`/`update_card` accept `checklist`)
+- Frosted-glass interface over an ambient backdrop lit by the active board's colour; Geist type and Phosphor icons
+- Cards show progress as a compact stage track (click a segment to set the stage); add cards inline at the bottom of a column (Enter adds, the box stays open for the next one, "Add details" opens the full dialog)
+- **Settings > Appearance**: Day / Night / System theme (also a sun/moon toggle in the top bar), Glass / Solid surfaces, transition speed (Snappy, Normal, Relaxed, Off), and Comfortable / Compact density, saved per browser
+- Press `/` to jump to the task filter; `Esc` clears it
 - Work **kind** (development / chore / managing) with kind-specific progress stages
 - Due dates auto-rank cards (sooner dues nearer the top)
 - Soft-archive (including auto-archive of Done cards after 5 days)

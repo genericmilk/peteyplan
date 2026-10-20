@@ -11,6 +11,7 @@ import {
   type KindId,
   type ProgressId,
 } from './utils/progress'
+import { normalizeChecklist, type ChecklistItem } from '../shared/checklist'
 
 /**
  * SQLite data layer for PeteyPlan.
@@ -47,7 +48,8 @@ db.exec(`
     position      INTEGER NOT NULL DEFAULT 0,
     completed_at  TEXT,
     archived_at   TEXT,
-    viewed_at     TEXT
+    viewed_at     TEXT,
+    checklist     TEXT NOT NULL DEFAULT '[]'
   );
 
   CREATE TABLE IF NOT EXISTS releases (
@@ -92,6 +94,9 @@ if (!cardColumnNames.has('release_id')) {
 if (!cardColumnNames.has('viewed_at')) {
   // NULL = unopened since creation (or since this migration for pre-existing cards).
   db.exec(`ALTER TABLE cards ADD COLUMN viewed_at TEXT`)
+}
+if (!cardColumnNames.has('checklist')) {
+  db.exec(`ALTER TABLE cards ADD COLUMN checklist TEXT NOT NULL DEFAULT '[]'`)
 }
 if (!cardColumnNames.has('number')) {
   db.exec(`ALTER TABLE cards ADD COLUMN number INTEGER`)
@@ -252,6 +257,8 @@ export interface Card {
   columnId: string
   /** Assigned release folder id, or null */
   releaseId: string | null
+  /** To-do items inside the card */
+  checklist: ChecklistItem[]
 }
 
 export interface Release {
@@ -297,6 +304,7 @@ interface CardRow {
   archived_at: string | null
   release_id: string | null
   viewed_at: string | null
+  checklist: string
 }
 
 /** Prefix for user-facing card refs (`PP-12`). */
@@ -371,6 +379,7 @@ function toCard(row: CardRow): Card {
     viewedAt: row.viewed_at || null,
     columnId: row.column_id,
     releaseId: row.release_id || null,
+    checklist: normalizeChecklist(row.checklist),
   }
 }
 
@@ -479,7 +488,7 @@ export function getBoard(boardId = DEFAULT_BOARD_ID): { columns: Column[]; relea
   const cards = db
     .prepare(
       `SELECT id, column_id, number, title, description, jira_key, due_by, kind, progress, position,
-              completed_at, archived_at, release_id, viewed_at
+              completed_at, archived_at, release_id, viewed_at, checklist
        FROM cards
        WHERE archived_at IS NULL AND column_id IN (SELECT id FROM columns WHERE board_id = ?)
        ORDER BY ${CARD_ORDER_SQL}`
@@ -531,7 +540,7 @@ export function getReleases(cardById?: Map<string, Card>, boardId = DEFAULT_BOAR
     const cards = db
       .prepare(
         `SELECT id, column_id, number, title, description, jira_key, due_by, kind, progress, position,
-                completed_at, archived_at, release_id, viewed_at
+                completed_at, archived_at, release_id, viewed_at, checklist
          FROM cards
          WHERE archived_at IS NULL AND release_id IS NOT NULL
          ORDER BY ${CARD_ORDER_SQL}`
@@ -646,7 +655,7 @@ export function getArchivedCards(boardId = DEFAULT_BOARD_ID): ArchivedCard[] {
   const rows = db
     .prepare(
       `SELECT c.id, c.column_id, c.number, c.title, c.description, c.jira_key, c.due_by, c.kind, c.progress,
-              c.position, c.completed_at, c.archived_at, c.release_id, c.viewed_at, col.title AS column_title
+              c.position, c.completed_at, c.archived_at, c.release_id, c.viewed_at, c.checklist, col.title AS column_title
        FROM cards c
        LEFT JOIN columns col ON col.id = c.column_id
        WHERE c.archived_at IS NOT NULL AND col.board_id = ?
@@ -726,7 +735,8 @@ export function addCard(
   progress: ProgressId = DEFAULT_PROGRESS,
   kind: KindId = DEFAULT_KIND,
   /** When true (UI create), card starts viewed so no unread dot. MCP/API leave null. */
-  markViewed = false
+  markViewed = false,
+  checklist: ChecklistItem[] = []
 ): CardRow | undefined {
   if (!getColumn(columnId)) return undefined
   const position =
@@ -755,11 +765,12 @@ export function addCard(
     archived_at: null,
     release_id: null,
     viewed_at,
+    checklist: JSON.stringify(normalizeChecklist(checklist)),
   }
   db.prepare(
     `INSERT INTO cards
-     (id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at, release_id, viewed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at, release_id, viewed_at, checklist)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     card.id,
     card.column_id,
@@ -774,7 +785,8 @@ export function addCard(
     card.completed_at,
     card.archived_at,
     card.release_id,
-    card.viewed_at
+    card.viewed_at,
+    card.checklist
   )
   rerankColumnByDue(columnId)
   const ranked = db.prepare('SELECT * FROM cards WHERE id = ?').get(card.id) as CardRow
@@ -794,6 +806,7 @@ export function updateCard(
     releaseId?: string | null
     /** Set true to mark the card as viewed */
     viewed?: boolean
+    checklist?: ChecklistItem[]
   }
 ): CardRow | undefined {
   const existing = db.prepare('SELECT * FROM cards WHERE id = ?').get(id) as CardRow | undefined
@@ -819,11 +832,13 @@ export function updateCard(
   }
   const viewed_at =
     changes.viewed === true && !existing.viewed_at ? nowIso() : existing.viewed_at
+  const checklist =
+    changes.checklist !== undefined ? JSON.stringify(normalizeChecklist(changes.checklist)) : existing.checklist
   db.prepare(
     `UPDATE cards
-     SET title = ?, description = ?, jira_key = ?, due_by = ?, kind = ?, progress = ?, completed_at = ?, release_id = ?, viewed_at = ?
+     SET title = ?, description = ?, jira_key = ?, due_by = ?, kind = ?, progress = ?, completed_at = ?, release_id = ?, viewed_at = ?, checklist = ?
      WHERE id = ?`
-  ).run(title, description, jira_key, due_by, kind, progress, completed_at, release_id, viewed_at, id)
+  ).run(title, description, jira_key, due_by, kind, progress, completed_at, release_id, viewed_at, checklist, id)
 
   rerankColumnByDue(existing.column_id)
   return db.prepare('SELECT * FROM cards WHERE id = ?').get(id) as CardRow

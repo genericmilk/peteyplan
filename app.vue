@@ -1,6 +1,25 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
+  PhArchive,
+  PhArrowLeft,
+  PhArrowRight,
+  PhCaretDown,
+  PhDotsSixVertical,
+  PhDotsThreeVertical,
+  PhGear,
+  PhListChecks,
+  PhMagnifyingGlass,
+  PhMoon,
+  PhPencilSimple,
+  PhPlus,
+  PhRocketLaunch,
+  PhSquaresFour,
+  PhSun,
+  PhTrash,
+  PhX,
+} from '@phosphor-icons/vue'
+import {
   ARCHIVE_AFTER_DAYS,
   CARD_KINDS,
   DEFAULT_KIND,
@@ -14,6 +33,21 @@ import {
   type KindId,
   type ProgressId,
 } from '~/shared/progress'
+import {
+  CHECKLIST_ITEM_MAX_LENGTH,
+  checklistProgress,
+  newChecklistItem,
+  normalizeChecklist,
+  type ChecklistItem,
+} from '~/shared/checklist'
+import {
+  DENSITY_OPTIONS,
+  MOTION_OPTIONS,
+  SURFACE_OPTIONS,
+  THEME_OPTIONS,
+  initPreferences,
+  usePreferences,
+} from '~/composables/usePreferences'
 
 interface Card {
   id: string
@@ -29,6 +63,8 @@ interface Card {
   /** ISO datetime when opened in the UI; null/undefined = unopened (show unread dot) */
   viewedAt?: string | null
   releaseId?: string | null
+  columnId?: string
+  checklist?: ChecklistItem[]
 }
 interface Column { id: string; title: string; cards: Card[] }
 interface Release {
@@ -57,6 +93,7 @@ interface ArchivedCard {
   archivedAt: string | null
   columnId: string
   columnTitle: string | null
+  checklist?: ChecklistItem[]
 }
 
 type TextPart = { type: 'text'; value: string } | { type: 'jira'; key: string }
@@ -297,10 +334,27 @@ function renderDescHtml(input: string): string {
 
 /* ── State ─────────────────────────────────────────────────────────────────── */
 
+const { prefs, resolvedTheme, motionFactor, toggleTheme } = usePreferences()
+
+useHead(() => ({
+  link: [{
+    key: 'peteyplan-favicon',
+    id: 'peteyplan-favicon',
+    rel: 'icon',
+    type: 'image/svg+xml',
+    href: import.meta.server ? '/favicon.svg' : `/favicon-${resolvedTheme.value}.svg`,
+  }],
+}))
+
 const board = ref<Board>({ columns: [], releases: [] })
 const boards = ref<BoardInfo[]>([])
 const activeBoardId = ref('board-default')
 const activeBoard = computed(() => boards.value.find((entry) => entry.id === activeBoardId.value))
+
+// The ambient backdrop takes the active board's colour (cross-fades via the registered --ambient property).
+watch(() => activeBoard.value?.color, (color) => {
+  if (color && typeof document !== 'undefined') document.documentElement.style.setProperty('--ambient', color)
+})
 const switchingBoardId = ref<string | null>(null)
 let boardRequest = 0
 let boardRefreshRequest = 0
@@ -329,6 +383,7 @@ function cardMatchesQuery(card: Card, q: string): boolean {
     kindDef(kind).label,
     card.progress ?? '',
     stage?.label ?? '',
+    ...(card.checklist ?? []).map((item) => item.text),
   ]
     .join(' ')
     .toLowerCase()
@@ -422,7 +477,7 @@ async function switchBoard(id: string) {
   const fromIndex = boards.value.findIndex((entry) => entry.id === activeBoardId.value)
   const toIndex = boards.value.findIndex((entry) => entry.id === id)
   const direction = toIndex > fromIndex ? 1 : -1
-  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const reduceMotion = motionFactor.value === 0
   const route = fromIndex < 0 || reduceMotion
     ? boards.value.filter((entry) => entry.id === id)
     : boards.value.filter((_, index) => direction > 0
@@ -464,7 +519,7 @@ async function switchBoard(id: string) {
       if (el) el.scrollLeft = 0
       if (snapshot && el) {
         const width = el.clientWidth
-        const duration = steps.length === 1 ? 300 : 180
+        const duration = (steps.length === 1 ? 300 : 180) * motionFactor.value
         const easing = steps.length === 1 ? 'cubic-bezier(.2,.65,.35,1)'
           : index === 0 ? 'cubic-bezier(.45,0,1,1)'
           : index === steps.length - 1 ? 'cubic-bezier(0,0,.55,1)' : 'linear'
@@ -717,7 +772,8 @@ async function saveCard(
   jiraKey: string,
   dueBy: string,
   progress: ProgressId = DEFAULT_PROGRESS,
-  kind: KindId = DEFAULT_KIND
+  kind: KindId = DEFAULT_KIND,
+  checklist: ChecklistItem[] = []
 ) {
   const trimmed = title.trim()
   if (!trimmed || !findColumn(columnId)) return
@@ -729,6 +785,7 @@ async function saveCard(
     dueBy: dueBy.trim(),
     kind: normalizedKind,
     progress: normalizeProgress(progress, normalizedKind),
+    checklist: normalizeChecklist(checklist),
   }
   try {
     if (cardId) {
@@ -811,6 +868,10 @@ function cardProgress(card: Card): ProgressId {
   return normalizeProgress(card.progress, cardKind(card))
 }
 
+function cardStageLabel(card: Card): string {
+  return cardStages(card).find((stage) => stage.id === cardProgress(card))?.label ?? 'Todo'
+}
+
 function isProgressReached(card: Card, stageId: ProgressId): boolean {
   const kind = cardKind(card)
   return progressIndex(cardProgress(card), kind) >= progressIndex(stageId, kind)
@@ -859,6 +920,150 @@ function archiveCountdownTitle(card: Card): string {
 function onCardKindChange(cardId: string, event: Event) {
   const value = (event.target as HTMLSelectElement).value
   setCardKind(cardId, normalizeKind(value))
+}
+
+/* ── Card checklists (on the board) ────────────────────────────────────────── */
+
+const COLLAPSED_CHECKLISTS_KEY = 'peteyplan-collapsed-checklists'
+const CARD_CHECKLIST_PREVIEW = 6
+const collapsedChecklists = ref(new Set<string>())
+const quickAddCardId = ref<string | null>(null)
+const quickAddText = ref('')
+const checklistSaves = new Map<string, Promise<void>>()
+
+function checklistOf(card: Card): ChecklistItem[] {
+  return card.checklist ?? []
+}
+
+function isChecklistCollapsed(card: Card): boolean {
+  return collapsedChecklists.value.has(card.id)
+}
+
+function toggleChecklistCollapsed(card: Card) {
+  const next = new Set(collapsedChecklists.value)
+  if (next.has(card.id)) next.delete(card.id)
+  else next.add(card.id)
+  collapsedChecklists.value = next
+  try { localStorage.setItem(COLLAPSED_CHECKLISTS_KEY, JSON.stringify([...next])) } catch { /* storage unavailable */ }
+}
+
+/** Unticked items first so the remaining work stays visible in the preview. */
+function checklistPreview(card: Card): ChecklistItem[] {
+  const items = checklistOf(card)
+  if (items.length <= CARD_CHECKLIST_PREVIEW) return items
+  return [...items.filter((item) => !item.done), ...items.filter((item) => item.done)].slice(0, CARD_CHECKLIST_PREVIEW)
+}
+
+function findBoardCard(cardId: string): Card | undefined {
+  for (const col of board.value.columns) {
+    const card = col.cards.find((c) => c.id === cardId)
+    if (card) return card
+  }
+}
+
+/** Persist a card's current checklist; saves for one card run in order so the last edit wins. */
+function persistChecklist(cardId: string) {
+  const previous = checklistSaves.get(cardId) ?? Promise.resolve()
+  const next = previous.then(async () => {
+    const card = findBoardCard(cardId)
+    if (!card) return
+    try {
+      await api(`/api/cards/${cardId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ checklist: checklistOf(card) }),
+      })
+    } catch (err) {
+      fail(err)
+      await refreshBoard()
+    }
+  })
+  checklistSaves.set(cardId, next)
+  void next.finally(() => { if (checklistSaves.get(cardId) === next) checklistSaves.delete(cardId) })
+}
+
+function toggleChecklistItem(card: Card, itemId: string) {
+  const item = checklistOf(card).find((entry) => entry.id === itemId)
+  if (!item) return
+  item.done = !item.done
+  persistChecklist(card.id)
+}
+
+function startQuickAdd(card: Card) {
+  quickAddCardId.value = card.id
+  quickAddText.value = ''
+  if (isChecklistCollapsed(card)) toggleChecklistCollapsed(card)
+  nextTick(() => document.querySelector<HTMLInputElement>(`.card[data-id="${card.id}"] .checklist-quick-input`)?.focus())
+}
+
+function stopQuickAdd() {
+  quickAddCardId.value = null
+  quickAddText.value = ''
+}
+
+function submitQuickAdd(card: Card) {
+  const text = quickAddText.value.trim()
+  if (!text) { stopQuickAdd(); return }
+  card.checklist = [...checklistOf(card), newChecklistItem(text.slice(0, CHECKLIST_ITEM_MAX_LENGTH))]
+  quickAddText.value = ''
+  persistChecklist(card.id)
+}
+
+/* ── Inline card capture ─────────────────────────────────────────────────── */
+
+const quickCardColumnId = ref<string | null>(null)
+const quickCardTitle = ref('')
+const enteringCardIds = ref(new Set<string>())
+
+function startQuickCard(columnId: string) {
+  quickCardColumnId.value = columnId
+  quickCardTitle.value = ''
+  nextTick(() => document.querySelector<HTMLTextAreaElement>(`.column[data-id="${columnId}"] .quick-card textarea`)?.focus())
+}
+
+function stopQuickCard() {
+  quickCardColumnId.value = null
+  quickCardTitle.value = ''
+}
+
+/** Briefly flag a new card so it animates in where it lands. */
+function markCardEntering(cardId: string) {
+  enteringCardIds.value = new Set(enteringCardIds.value).add(cardId)
+  setTimeout(() => {
+    const next = new Set(enteringCardIds.value)
+    next.delete(cardId)
+    enteringCardIds.value = next
+  }, 600)
+}
+
+/** Create a card from the inline box; the box stays open for the next one. */
+async function submitQuickCard() {
+  const columnId = quickCardColumnId.value
+  const title = quickCardTitle.value.replace(/\s+/g, ' ').trim()
+  if (!columnId || !title || !findColumn(columnId)) return
+  quickCardTitle.value = ''
+  try {
+    const created = await api<Card>('/api/cards', {
+      method: 'POST',
+      body: JSON.stringify({ columnId, title, markViewed: true }),
+    })
+    markCardEntering(created.id)
+    await refreshBoard()
+  } catch (err) { fail(err) }
+}
+
+function onQuickCardBlur() {
+  if (quickCardTitle.value.trim()) void submitQuickCard()
+  stopQuickCard()
+}
+
+/** Hand the typed title over to the full card dialog. */
+function quickCardToDialog() {
+  const columnId = quickCardColumnId.value
+  const title = quickCardTitle.value.trim()
+  stopQuickCard()
+  if (!columnId) return
+  openCardDialog(columnId, null)
+  cardTitle.value = title
 }
 
 async function deleteCard(cardId: string) {
@@ -1215,6 +1420,60 @@ const cardDialogColumnId = ref<string | null>(null)
 const cardDialogCardId = ref<string | null>(null)
 const cardDialogRef = ref('')
 const descEditing = ref(false)
+const cardChecklist = ref<ChecklistItem[]>([])
+const checklistDraft = ref('')
+const checklistDraftInput = ref<HTMLInputElement | null>(null)
+const checklistDragIndex = ref<number | null>(null)
+
+const dialogChecklistProgress = computed(() => checklistProgress(cardChecklist.value))
+
+/** Checklist to save, including a typed-but-not-added item so it isn't lost. */
+function cardChecklistWithDraft(): ChecklistItem[] {
+  const text = checklistDraft.value.trim()
+  return text ? [...cardChecklist.value, newChecklistItem(text)] : cardChecklist.value
+}
+
+function addDialogChecklistItem() {
+  const text = checklistDraft.value.trim()
+  if (!text) return
+  cardChecklist.value.push(newChecklistItem(text))
+  checklistDraft.value = ''
+  nextTick(() => checklistDraftInput.value?.focus())
+}
+
+function removeDialogChecklistItem(index: number) {
+  cardChecklist.value.splice(index, 1)
+}
+
+/** Backspace in an emptied item removes it and focuses the previous one. */
+function onChecklistItemBackspace(event: KeyboardEvent, index: number) {
+  const item = cardChecklist.value[index]
+  if (item.text) return
+  event.preventDefault()
+  cardChecklist.value.splice(index, 1)
+  nextTick(() => {
+    const inputs = cardDialogEl.value?.querySelectorAll<HTMLInputElement>('.checklist-edit-text')
+    inputs?.[Math.max(0, index - 1)]?.focus()
+  })
+}
+
+function onChecklistItemDragStart(event: DragEvent, index: number) {
+  checklistDragIndex.value = index
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(index))
+  }
+}
+
+function onChecklistItemDragOver(event: DragEvent, index: number) {
+  const from = checklistDragIndex.value
+  if (from === null) return
+  event.preventDefault()
+  if (from === index) return
+  const [moved] = cardChecklist.value.splice(from, 1)
+  cardChecklist.value.splice(index, 0, moved)
+  checklistDragIndex.value = index
+}
 
 const dialogStages = computed(() => stagesForKind(cardKindId.value))
 
@@ -1285,6 +1544,8 @@ function openCardDialog(columnId: string, cardId: string | null) {
     cardTitle.value = card.title
     cardDesc.value = card.description || ''
     cardJiraKey.value = card.jiraKey || ''
+    cardDueBy.value = card.dueBy || ''
+    cardChecklist.value = (card.checklist ?? []).map((item) => ({ ...item }))
     cardKindId.value = normalizeKind(card.kind)
     cardProgressStage.value = normalizeProgress(card.progress, cardKindId.value)
     cardDeleteVisible.value = true
@@ -1297,6 +1558,7 @@ function openCardDialog(columnId: string, cardId: string | null) {
     cardDesc.value = ''
     cardJiraKey.value = ''
     cardDueBy.value = ''
+    cardChecklist.value = []
     cardKindId.value = DEFAULT_KIND
     cardProgressStage.value = DEFAULT_PROGRESS
     cardDeleteVisible.value = false
@@ -1318,6 +1580,8 @@ function onCardDialogClose() {
   cardDesc.value = ''
   cardJiraKey.value = ''
   cardDueBy.value = ''
+  cardChecklist.value = []
+  checklistDraft.value = ''
   cardKindId.value = DEFAULT_KIND
   cardProgressStage.value = DEFAULT_PROGRESS
   descEditing.value = false
@@ -1332,7 +1596,8 @@ async function saveCardFromDialog() {
     cardJiraKey.value,
     cardDueBy.value,
     cardProgressStage.value,
-    cardKindId.value
+    cardKindId.value,
+    cardChecklistWithDraft()
   )
   closeCardDialog()
 }
@@ -1522,9 +1787,11 @@ const settingsDialogEl = ref<HTMLDialogElement | null>(null)
 const boardDrafts = ref<BoardInfo[]>([])
 const newBoard = ref({ name: '', emoji: '📋', color: '#5b8cff' })
 const settingsBusy = ref(false)
+const settingsTab = ref<'appearance' | 'boards'>('appearance')
 
-function openSettings() {
+function openSettings(tab: 'appearance' | 'boards' = 'appearance') {
   closeBoardMenu()
+  settingsTab.value = tab
   boardDrafts.value = boards.value.map((entry) => ({ ...entry }))
   settingsDialogEl.value?.showModal()
 }
@@ -1643,6 +1910,17 @@ function onDocumentMousedown(event: MouseEvent) {
 }
 
 const boardEl = ref<HTMLElement | null>(null)
+const searchInputEl = ref<HTMLInputElement | null>(null)
+
+/** "/" jumps to the filter box; Escape in it clears the filter. */
+function onDocumentKeydown(event: KeyboardEvent) {
+  if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return
+  const target = event.target as HTMLElement | null
+  if (target?.closest('input, textarea, select, [contenteditable="true"]') || document.querySelector('dialog[open]')) return
+  event.preventDefault()
+  searchInputEl.value?.focus()
+  searchInputEl.value?.select()
+}
 
 /** After scrolling a column, keep horizontal pan locked briefly so overscroll doesn't jump sideways. */
 const COLUMN_SCROLL_UNLOCK_MS = 250
@@ -1702,7 +1980,13 @@ watch(boardEl, (el, prev) => {
 })
 
 onMounted(() => {
+  initPreferences()
+  try {
+    const stored = JSON.parse(localStorage.getItem(COLLAPSED_CHECKLISTS_KEY) || '[]')
+    if (Array.isArray(stored)) collapsedChecklists.value = new Set(stored.filter((id) => typeof id === 'string'))
+  } catch { /* storage unavailable */ }
   document.addEventListener('mousedown', onDocumentMousedown)
+  document.addEventListener('keydown', onDocumentKeydown)
   loadBoard()
 })
 
@@ -1711,6 +1995,7 @@ onBeforeUnmount(() => {
   cancelBoardPan?.()
   cancelPillHover()
   document.removeEventListener('mousedown', onDocumentMousedown)
+  document.removeEventListener('keydown', onDocumentKeydown)
   document.removeEventListener('dragover', onDocumentDragOver)
   stopEdgeScroll()
   boardEl.value?.removeEventListener('wheel', onBoardWheel)
@@ -1720,8 +2005,9 @@ onBeforeUnmount(() => {
 <template>
   <header class="topbar">
     <div class="brand">
-      <span class="logo"></span>
-      <h1>PeteyPlan</h1>
+      <span class="logo" aria-hidden="true"></span>
+      <h1 class="sr-only">PeteyPlan</h1>
+      <span class="brand-divider" aria-hidden="true"></span>
       <nav class="board-pills" aria-label="Boards">
         <button
           v-for="entry in boards"
@@ -1733,7 +2019,7 @@ onBeforeUnmount(() => {
           :aria-label="entry.name"
           :disabled="loading"
           :aria-pressed="entry.id === activeBoardId"
-          :title="entry.name + ' — drag a card or column here to switch boards'"
+          :title="entry.name + '. Drop a card or column here to move it to this board'"
           @click="switchBoard(entry.id)"
           @dragover="onPillDragOver($event, entry.id)"
           @dragleave="!($event.currentTarget as HTMLElement).contains($event.relatedTarget as Node | null) && cancelPillHover()"
@@ -1748,14 +2034,18 @@ onBeforeUnmount(() => {
     <div class="topbar-actions">
       <label class="topbar-search">
         <span class="sr-only">Filter tasks</span>
+        <PhMagnifyingGlass class="search-icon" :size="15" aria-hidden="true" />
         <input
+          ref="searchInputEl"
           v-model="searchQuery"
           class="search-input"
           type="search"
           placeholder="Filter tasks…"
           autocomplete="off"
           spellcheck="false"
+          @keydown.esc="searchQuery = ''"
         />
+        <kbd v-if="!searchQuery" class="search-kbd" aria-hidden="true">/</kbd>
       </label>
       <button
         class="btn"
@@ -1763,8 +2053,18 @@ onBeforeUnmount(() => {
         :aria-expanded="releasesOpen"
         aria-controls="releases-panel"
         @click="toggleReleasesPanel"
-      >Releases</button>
-      <button class="btn btn-primary" :disabled="loading || !!switchingBoardId" @click="openColumnDialog(null)">+ Add Column</button>
+      ><PhRocketLaunch :size="15" aria-hidden="true" />Releases</button>
+      <button class="btn btn-primary" :disabled="loading || !!switchingBoardId" @click="openColumnDialog(null)"><PhPlus :size="15" weight="bold" aria-hidden="true" />Column</button>
+      <button
+        type="button"
+        class="btn-icon theme-toggle"
+        :title="resolvedTheme === 'dark' ? 'Switch to day mode' : 'Switch to night mode'"
+        :aria-label="resolvedTheme === 'dark' ? 'Switch to day mode' : 'Switch to night mode'"
+        @click="toggleTheme"
+      >
+        <PhSun v-if="resolvedTheme === 'dark'" :size="18" aria-hidden="true" />
+        <PhMoon v-else :size="18" aria-hidden="true" />
+      </button>
       <button
         class="btn-icon board-menu-btn"
         :class="{ 'menu-open': !!boardMenu }"
@@ -1772,13 +2072,13 @@ onBeforeUnmount(() => {
         aria-label="Board options"
         @mousedown.stop
         @click="openBoardMenu($event)"
-      >⋮</button>
+      ><PhDotsThreeVertical :size="18" weight="bold" /></button>
     </div>
   </header>
 
   <div v-if="error" class="error-banner">
     <span>{{ error }}</span>
-    <button class="btn-icon" title="Dismiss" @click="error = null">&times;</button>
+    <button class="btn-icon" title="Dismiss" aria-label="Dismiss error" @click="error = null"><PhX :size="15" /></button>
   </div>
 
   <section
@@ -1794,7 +2094,7 @@ onBeforeUnmount(() => {
           Drag cards into a folder. Preprod update {{ PREPROD_HINT }} · Prod go-live {{ PROD_HINT }}
         </p>
       </div>
-      <button class="btn btn-primary" type="button" @click="addRelease">+ New release</button>
+      <button class="btn btn-primary" type="button" @click="addRelease"><PhPlus :size="15" weight="bold" aria-hidden="true" />New release</button>
     </div>
     <div class="releases-row">
       <article
@@ -1816,7 +2116,7 @@ onBeforeUnmount(() => {
               title="Edit release"
               aria-label="Edit release"
               @click="openReleaseDialog(rel.id)"
-            >✎</button>
+            ><PhPencilSimple :size="15" /></button>
           </div>
           <div class="release-schedule">
             <div class="release-schedule-row">
@@ -1879,7 +2179,7 @@ onBeforeUnmount(() => {
               title="Remove from release"
               aria-label="Remove from release"
               @click="removeCardFromRelease(rel.id, card.id)"
-            >&times;</button>
+            ><PhX :size="14" /></button>
           </li>
           <li v-if="rel.cards.length === 0" class="release-empty">
             {{ dragged ? 'Drop card here' : 'Drop cards here' }}
@@ -1892,7 +2192,12 @@ onBeforeUnmount(() => {
     </div>
   </section>
 
-  <main v-if="loading" class="board-loading">Loading board…</main>
+  <main v-if="loading" class="board-loading" aria-busy="true" aria-label="Loading board">
+    <div v-for="n in 3" :key="n" class="skeleton-column" aria-hidden="true">
+      <div class="skeleton-line"></div>
+      <div v-for="m in 4 - n % 2" :key="m" class="skeleton-card"></div>
+    </div>
+  </main>
 
   <div v-else class="board-viewport">
   <main
@@ -1908,7 +2213,7 @@ onBeforeUnmount(() => {
       <div v-if="!col.parked && isColumnDropIndicator(colIndex)" class="column column-placeholder" aria-hidden="true"></div>
       <section
         class="column"
-        :class="{ dragging: draggedColumnId === col.id, 'drag-source-parked': col.parked }"
+        :class="{ dragging: draggedColumnId === col.id, 'drag-source-parked': col.parked, 'is-done-column': isDoneColumn(col) }"
         :aria-hidden="col.parked || undefined"
         :data-id="col.id"
       >
@@ -1928,9 +2233,10 @@ onBeforeUnmount(() => {
           class="btn-icon"
           :class="{ 'menu-open': columnMenu?.columnId === col.id }"
           title="Column options"
+          aria-label="Column options"
           @mousedown.stop
           @click="openColumnMenu(col.id, $event)"
-        >⋮</button>
+        ><PhDotsThreeVertical :size="17" weight="bold" /></button>
       </div>
 
       <div
@@ -1943,9 +2249,9 @@ onBeforeUnmount(() => {
           <div v-if="!isSearching && isDropIndicator(col.id, index)" class="card placeholder"></div>
           <article
             class="card"
-            :class="{ dragging: draggingId === card.id }"
+            :class="{ dragging: draggingId === card.id, 'card-enter': enteringCardIds.has(card.id) }"
             :data-id="card.id"
-            :draggable="!isSearching"
+            :draggable="!isSearching && quickAddCardId !== card.id"
             @click="openCardUnlessLink($event, col.id, card.id)"
             @dragstart="onCardDragStart($event, col.id, card)"
             @dragend="onCardDragEnd"
@@ -1953,7 +2259,7 @@ onBeforeUnmount(() => {
             <span
               v-if="!card.viewedAt"
               class="card-unopened"
-              title="New — not opened yet"
+              title="New, not opened yet"
               aria-label="New card, not opened yet"
             ></span>
             <div class="card-meta">
@@ -2001,46 +2307,107 @@ onBeforeUnmount(() => {
             </div>
             <div v-if="card.description" class="card-desc" v-html="renderDescHtml(card.description)"></div>
             <div
-              class="card-status"
+              v-if="checklistOf(card).length || quickAddCardId === card.id"
+              class="card-checklist"
               @click.stop
               @mousedown.stop
             >
-              <label class="card-kind">
-                <span class="sr-only">Work type</span>
-                <select
-                  class="kind-select"
-                  :value="cardKind(card)"
-                  :title="'Work type'"
-                  :aria-label="'Work type for ' + (card.title || 'card')"
-                  @change="onCardKindChange(card.id, $event)"
+              <button
+                v-if="checklistOf(card).length"
+                type="button"
+                class="checklist-summary"
+                :class="{ collapsed: isChecklistCollapsed(card) }"
+                :aria-expanded="!isChecklistCollapsed(card)"
+                :title="isChecklistCollapsed(card) ? 'Show checklist' : 'Hide checklist'"
+                @click="toggleChecklistCollapsed(card)"
+              >
+                <PhCaretDown class="checklist-chevron" :size="11" weight="bold" aria-hidden="true" />
+                <PhListChecks :size="14" aria-hidden="true" />
+                <span
+                  class="checklist-count"
+                  :class="{ complete: checklistProgress(checklistOf(card)).done === checklistOf(card).length }"
+                >{{ checklistProgress(checklistOf(card)).done }}/{{ checklistOf(card).length }}</span>
+              </button>
+              <ul v-if="!isChecklistCollapsed(card)" class="checklist-items">
+                <li
+                  v-for="item in checklistPreview(card)"
+                  :key="item.id"
+                  :class="{ done: item.done }"
                 >
-                  <option
-                    v-for="kind in CARD_KINDS"
-                    :key="kind.id"
-                    :value="kind.id"
-                  >{{ kind.label }}</option>
-                </select>
-              </label>
+                  <label class="checklist-item">
+                    <input
+                      type="checkbox"
+                      :checked="item.done"
+                      @change="toggleChecklistItem(card, item.id)"
+                    />
+                    <span class="checklist-item-text">{{ item.text }}</span>
+                  </label>
+                </li>
+                <li v-if="checklistOf(card).length > checklistPreview(card).length" class="checklist-more">
+                  <button type="button" @click="openCardDialog(col.id, card.id)">
+                    +{{ checklistOf(card).length - checklistPreview(card).length }} more
+                  </button>
+                </li>
+              </ul>
+              <form v-if="quickAddCardId === card.id" class="checklist-quick" @submit.prevent="submitQuickAdd(card)">
+                <input
+                  v-model="quickAddText"
+                  class="checklist-quick-input"
+                  type="text"
+                  :maxlength="CHECKLIST_ITEM_MAX_LENGTH"
+                  placeholder="Add an item, press Enter"
+                  aria-label="New checklist item"
+                  @keydown.esc.prevent="stopQuickAdd"
+                  @blur="submitQuickAdd(card); stopQuickAdd()"
+                />
+              </form>
+            </div>
+            <div class="card-status" @click.stop @mousedown.stop>
               <div
-                class="card-progress"
+                class="stage-track"
+                :class="{ 'is-done': cardProgress(card) === 'done' }"
                 role="group"
-                :aria-label="'Progress: ' + (cardStages(card).find((s) => s.id === cardProgress(card))?.label || 'Todo')"
+                :aria-label="'Progress: ' + cardStageLabel(card)"
               >
                 <button
                   v-for="stage in cardStages(card)"
                   :key="stage.id"
                   type="button"
-                  class="progress-pill"
-                  :class="{
-                    reached: isProgressReached(card, stage.id),
-                    current: isProgressCurrent(card, stage.id),
-                    done: cardProgress(card) === 'done' && stage.id === 'done',
-                  }"
-                  :title="stage.label"
+                  class="stage-step"
+                  :class="{ reached: isProgressReached(card, stage.id), current: isProgressCurrent(card, stage.id) }"
+                  :data-label="isProgressCurrent(card, stage.id) ? stage.label + ' (current)' : 'Set to ' + stage.label"
                   :aria-label="'Set progress to ' + stage.label"
                   :aria-pressed="isProgressCurrent(card, stage.id)"
                   @click="setCardProgress(card.id, stage.id)"
-                >{{ stage.label }}</button>
+                ></button>
+              </div>
+              <div class="card-footer">
+                <span class="stage-label" :class="{ 'is-done': cardProgress(card) === 'done' }">{{ cardStageLabel(card) }}</span>
+                <label class="card-kind">
+                  <span class="sr-only">Work type</span>
+                  <select
+                    class="kind-select"
+                    :value="cardKind(card)"
+                    title="Work type"
+                    :aria-label="'Work type for ' + (card.title || 'card')"
+                    @change="onCardKindChange(card.id, $event)"
+                  >
+                    <option
+                      v-for="kind in CARD_KINDS"
+                      :key="kind.id"
+                      :value="kind.id"
+                    >{{ kind.label }}</option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  class="btn-icon checklist-add-btn"
+                  title="Add checklist item"
+                  :aria-label="'Add checklist item to ' + card.title"
+                  @click="startQuickAdd(card)"
+                >
+                  <PhListChecks :size="15" />
+                </button>
               </div>
             </div>
           </article>
@@ -2052,7 +2419,24 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="column-footer">
-        <button class="add-card" @click="openCardDialog(col.id, null)">+ Add card</button>
+        <form v-if="quickCardColumnId === col.id" class="quick-card" @submit.prevent="submitQuickCard">
+          <textarea
+            v-model="quickCardTitle"
+            rows="2"
+            maxlength="120"
+            placeholder="What needs doing?"
+            :aria-label="'New card in ' + col.title"
+            @keydown.enter.exact.prevent="submitQuickCard"
+            @keydown.esc.prevent="stopQuickCard"
+            @blur="onQuickCardBlur"
+          ></textarea>
+          <div class="quick-card-hint">
+            <span><kbd>Enter</kbd> to add</span>
+            <span class="spacer"></span>
+            <button type="button" @mousedown.prevent @click="quickCardToDialog">Add details</button>
+          </div>
+        </form>
+        <button v-else class="add-card" @click="startQuickCard(col.id)"><PhPlus :size="14" weight="bold" aria-hidden="true" />Add card</button>
       </div>
     </section>
     </template>
@@ -2062,37 +2446,144 @@ onBeforeUnmount(() => {
       aria-hidden="true"
     ></div>
     <div v-if="board.columns.length === 0" class="board-empty">
-      <h2>{{ activeBoard?.emoji }} {{ activeBoard?.name }}</h2>
-      <p>{{ foreignDrag && dragged ? 'Drop your card here to create a To Do column.' : 'A fresh space for your work. Add a column or drag one here from another board.' }}</p>
-      <button class="btn btn-primary" @click="openColumnDialog(null)">+ Add Column</button>
+      <div class="board-empty-emoji" aria-hidden="true">{{ activeBoard?.emoji }}</div>
+      <h2>{{ activeBoard?.name }}</h2>
+      <p>{{ foreignDrag && dragged ? 'Drop your card here to create a To Do column.' : 'Nothing here yet. Add a column, or drag one in from another board.' }}</p>
+      <button class="btn btn-primary" @click="openColumnDialog(null)"><PhPlus :size="15" weight="bold" aria-hidden="true" />Add column</button>
     </div>
   </main>
   </div>
 
   <dialog ref="settingsDialogEl" class="settings-dialog" aria-labelledby="board-settings-title" @cancel="settingsBusy && $event.preventDefault()">
     <div class="dialog-form">
-      <h2 id="board-settings-title">Board settings</h2>
-      <p class="settings-hint">Choose a name, emoji and colour for each board. The default board can be edited but never deleted.</p>
+      <h2 id="board-settings-title">Settings</h2>
+      <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+        <button
+          id="settings-tab-appearance"
+          type="button"
+          role="tab"
+          class="settings-tab"
+          :aria-selected="settingsTab === 'appearance'"
+          aria-controls="settings-panel-appearance"
+          @click="settingsTab = 'appearance'"
+        >Appearance</button>
+        <button
+          id="settings-tab-boards"
+          type="button"
+          role="tab"
+          class="settings-tab"
+          :aria-selected="settingsTab === 'boards'"
+          aria-controls="settings-panel-boards"
+          @click="settingsTab = 'boards'"
+        >Boards</button>
+      </div>
       <p v-if="error" class="settings-error" role="alert">{{ error }}</p>
-      <form
-        v-for="draft in boardDrafts"
-        :key="draft.id"
-        class="board-settings-row"
-        @submit.prevent="saveBoardSettings(draft, draft.id)"
+
+      <section
+        v-show="settingsTab === 'appearance'"
+        id="settings-panel-appearance"
+        role="tabpanel"
+        aria-labelledby="settings-tab-appearance"
+        class="settings-panel"
       >
-        <BoardEmojiPicker v-model="draft.emoji" :label="'Emoji for ' + draft.name" :disabled="settingsBusy" />
-        <label class="board-name-field">Name<input v-model="draft.name" :aria-label="'Name for ' + draft.name" required maxlength="60" /></label>
-        <label>Colour<input v-model="draft.color" :aria-label="'Colour for ' + draft.name" type="color" required /></label>
-        <button class="btn" :disabled="settingsBusy" type="submit">Save</button>
-        <button class="btn btn-danger" :disabled="settingsBusy || draft.isDefault" :title="draft.isDefault ? 'The default board cannot be deleted' : 'Delete board and all its contents'" type="button" @click="removeBoard(draft)">Delete</button>
-      </form>
-      <form class="board-settings-row new-board-form" @submit.prevent="saveBoardSettings(newBoard)">
-        <h3>New board</h3>
-        <BoardEmojiPicker v-model="newBoard.emoji" label="New board emoji" :disabled="settingsBusy" />
-        <label class="board-name-field">Name<input v-model="newBoard.name" aria-label="New board name" placeholder="Board name" required maxlength="60" /></label>
-        <label>Colour<input v-model="newBoard.color" aria-label="New board colour" type="color" required /></label>
-        <button class="btn btn-primary" :disabled="settingsBusy" type="submit">Create board</button>
-      </form>
+        <div class="setting-row">
+          <div class="setting-label">
+            <h3>Theme</h3>
+            <p>Day, night, or follow your system. The sun/moon button in the top bar flips it quickly.</p>
+          </div>
+          <div class="segmented" role="radiogroup" aria-label="Theme">
+            <button
+              v-for="option in THEME_OPTIONS"
+              :key="option.id"
+              type="button"
+              role="radio"
+              :aria-checked="prefs.theme === option.id"
+              @click="prefs.theme = option.id"
+            >{{ option.id === 'light' ? '☀︎' : option.id === 'dark' ? '☾' : '◐' }} {{ option.label }}</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">
+            <h3>Surfaces</h3>
+            <p>Frosted glass lets each board's colour glow through. Solid is plainer and lighter on older machines.</p>
+          </div>
+          <div class="segmented" role="radiogroup" aria-label="Surfaces">
+            <button
+              v-for="option in SURFACE_OPTIONS"
+              :key="option.id"
+              type="button"
+              role="radio"
+              :aria-checked="prefs.surface === option.id"
+              @click="prefs.surface = option.id"
+            >{{ option.label }}</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">
+            <h3>Transition speed</h3>
+            <p>
+              Board switches, hover effects and panels.
+              <template v-if="motionFactor === 0 && prefs.motion !== 'off'"> Your system's reduce-motion setting is on, so animations are off.</template>
+            </p>
+          </div>
+          <div class="segmented" role="radiogroup" aria-label="Transition speed">
+            <button
+              v-for="option in MOTION_OPTIONS"
+              :key="option.id"
+              type="button"
+              role="radio"
+              :aria-checked="prefs.motion === option.id"
+              @click="prefs.motion = option.id"
+            >{{ option.label }}</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">
+            <h3>Density</h3>
+            <p>Compact fits more cards and narrower columns on screen.</p>
+          </div>
+          <div class="segmented" role="radiogroup" aria-label="Density">
+            <button
+              v-for="option in DENSITY_OPTIONS"
+              :key="option.id"
+              type="button"
+              role="radio"
+              :aria-checked="prefs.density === option.id"
+              @click="prefs.density = option.id"
+            >{{ option.label }}</button>
+          </div>
+        </div>
+        <p class="settings-hint">Appearance is saved in this browser. Press <kbd>/</kbd> anywhere to filter tasks.</p>
+      </section>
+
+      <section
+        v-show="settingsTab === 'boards'"
+        id="settings-panel-boards"
+        role="tabpanel"
+        aria-labelledby="settings-tab-boards"
+        class="settings-panel"
+      >
+        <p class="settings-hint">Choose a name, emoji and colour for each board. The default board can be edited but never deleted.</p>
+        <form
+          v-for="draft in boardDrafts"
+          :key="draft.id"
+          class="board-settings-row"
+          @submit.prevent="saveBoardSettings(draft, draft.id)"
+        >
+          <BoardEmojiPicker v-model="draft.emoji" :label="'Emoji for ' + draft.name" :disabled="settingsBusy" />
+          <label class="board-name-field">Name<input v-model="draft.name" :aria-label="'Name for ' + draft.name" required maxlength="60" /></label>
+          <label>Colour<input v-model="draft.color" :aria-label="'Colour for ' + draft.name" type="color" required /></label>
+          <button class="btn" :disabled="settingsBusy" type="submit">Save</button>
+          <button class="btn btn-danger" :disabled="settingsBusy || draft.isDefault" :title="draft.isDefault ? 'The default board cannot be deleted' : 'Delete board and all its contents'" type="button" @click="removeBoard(draft)">Delete</button>
+        </form>
+        <form class="board-settings-row new-board-form" @submit.prevent="saveBoardSettings(newBoard)">
+          <h3>New board</h3>
+          <BoardEmojiPicker v-model="newBoard.emoji" label="New board emoji" :disabled="settingsBusy" />
+          <label class="board-name-field">Name<input v-model="newBoard.name" aria-label="New board name" placeholder="Board name" required maxlength="60" /></label>
+          <label>Colour<input v-model="newBoard.color" aria-label="New board colour" type="color" required /></label>
+          <button class="btn btn-primary" :disabled="settingsBusy" type="submit">Create board</button>
+        </form>
+      </section>
       <div class="dialog-actions">
         <span class="spacer"></span>
         <button class="btn" :disabled="settingsBusy" @click="settingsDialogEl?.close()">Close</button>
@@ -2184,7 +2675,72 @@ onBeforeUnmount(() => {
             </div>
           </fieldset>
         </div>
-        <div class="card-dialog-desc">
+        <div class="card-dialog-side">
+        <div class="card-dialog-checklist">
+          <div class="card-dialog-field-heading">
+            <span class="card-dialog-desc-label">Checklist</span>
+            <span
+              v-if="dialogChecklistProgress.total"
+              class="checklist-count"
+              :class="{ complete: dialogChecklistProgress.done === dialogChecklistProgress.total }"
+            >{{ dialogChecklistProgress.done }}/{{ dialogChecklistProgress.total }}</span>
+          </div>
+          <span
+            v-if="dialogChecklistProgress.total"
+            class="checklist-bar checklist-bar-wide"
+            :class="{ 'checklist-bar-complete': dialogChecklistProgress.done === dialogChecklistProgress.total }"
+            aria-hidden="true"
+          >
+            <span :style="{ width: (dialogChecklistProgress.done / dialogChecklistProgress.total) * 100 + '%' }"></span>
+          </span>
+          <ul v-if="cardChecklist.length" class="checklist-edit">
+            <li
+              v-for="(item, index) in cardChecklist"
+              :key="item.id"
+              :class="{ done: item.done, dragging: checklistDragIndex === index }"
+              @dragover="onChecklistItemDragOver($event, index)"
+              @drop.prevent
+            >
+              <span
+                class="checklist-handle"
+                draggable="true"
+                title="Drag to reorder"
+                aria-hidden="true"
+                @dragstart="onChecklistItemDragStart($event, index)"
+                @dragend="checklistDragIndex = null"
+              ><PhDotsSixVertical :size="14" weight="bold" /></span>
+              <input v-model="item.done" type="checkbox" :aria-label="'Done: ' + item.text" />
+              <input
+                v-model="item.text"
+                class="checklist-edit-text"
+                type="text"
+                :maxlength="CHECKLIST_ITEM_MAX_LENGTH"
+                :aria-label="'Checklist item ' + (index + 1)"
+                @keydown.enter.prevent="checklistDraftInput?.focus()"
+                @keydown.backspace="onChecklistItemBackspace($event, index)"
+              />
+              <button
+                type="button"
+                class="btn-icon checklist-remove"
+                title="Remove item"
+                :aria-label="'Remove ' + item.text"
+                @click="removeDialogChecklistItem(index)"
+              ><PhX :size="14" /></button>
+            </li>
+          </ul>
+          <input
+            ref="checklistDraftInput"
+            v-model="checklistDraft"
+            class="checklist-draft"
+            type="text"
+            :maxlength="CHECKLIST_ITEM_MAX_LENGTH"
+            placeholder="+ Add an item, press Enter"
+            aria-label="New checklist item"
+            autocomplete="off"
+            @keydown.enter.prevent="addDialogChecklistItem"
+          />
+        </div>
+        <div class="card-dialog-desc" :class="{ 'with-checklist': cardChecklist.length > 0 }">
           <span class="card-dialog-desc-label">Description</span>
           <textarea
             v-if="descEditing"
@@ -2206,6 +2762,7 @@ onBeforeUnmount(() => {
             <div v-if="cardDesc" class="md-body" v-html="renderDescHtml(cardDesc)"></div>
             <span v-else class="card-dialog-desc-placeholder">Click to add a description…</span>
           </div>
+        </div>
         </div>
       </div>
       <div class="dialog-actions">
@@ -2239,7 +2796,7 @@ onBeforeUnmount(() => {
           v-model="releaseWeekStart"
           type="date"
           class="due-input"
-          title="Monday of the release week — preprod that evening, prod next day"
+          title="Monday of the release week. Preprod goes out that evening, prod the next day."
         />
       </label>
       <p class="release-dialog-schedule">
@@ -2329,15 +2886,16 @@ onBeforeUnmount(() => {
     class="column-menu"
     :style="{ top: columnMenu.top + 'px', right: columnMenu.right + 'px' }"
   >
-    <button @click="renameColumnFromMenu">Rename column</button>
-    <button :disabled="!canMoveColumnLeft" @click="moveColumnLeftFromMenu">Move left</button>
-    <button :disabled="!canMoveColumnRight" @click="moveColumnRightFromMenu">Move right</button>
+    <button @click="renameColumnFromMenu"><PhPencilSimple :size="15" />Rename</button>
+    <button :disabled="!canMoveColumnLeft" @click="moveColumnLeftFromMenu"><PhArrowLeft :size="15" />Move left</button>
+    <button :disabled="!canMoveColumnRight" @click="moveColumnRightFromMenu"><PhArrowRight :size="15" />Move right</button>
+    <hr />
     <button
       class="danger"
       :disabled="columnMenuCardCount === 0"
       @click="clearColumnCardsFromMenu"
-    >Archive all cards</button>
-    <button class="danger" @click="deleteColumnFromMenu">Delete column</button>
+    ><PhArchive :size="15" />Archive all cards</button>
+    <button class="danger" @click="deleteColumnFromMenu"><PhTrash :size="15" />Delete column</button>
   </div>
 
   <!-- Board dropdown menu -->
@@ -2347,8 +2905,9 @@ onBeforeUnmount(() => {
     class="column-menu"
     :style="{ top: boardMenu.top + 'px', right: boardMenu.right + 'px' }"
   >
-    <button @click="openSettings">Settings</button>
-    <button @click="openArchiveFromMenu">Archive</button>
+    <button @click="openSettings('appearance')"><PhGear :size="15" />Settings</button>
+    <button @click="openSettings('boards')"><PhSquaresFour :size="15" />Manage boards</button>
+    <button @click="openArchiveFromMenu"><PhArchive :size="15" />Archive</button>
   </div>
 
   <!-- Archive screen -->
