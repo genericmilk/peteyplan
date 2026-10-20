@@ -130,7 +130,8 @@ Return to the latest version with `git checkout main && git pull`.
 - Jira keys like `CX-1831` link straight to the issue wherever they appear.
 
 **Looks the way you like**
-- Frosted-glass interface lit by the active board's colour.
+- Frosted-glass interface themed by the active board: its colour lights the backdrop and tints the buttons, links, progress, logo and tab icon (shades are adjusted automatically so text stays readable).
+- Switching boards is a quick slide that takes about 100ms however many boards it passes.
 - **Settings → Appearance**: Day, Night or System theme (or the sun/moon button), Glass or Solid surfaces, transition speed, and comfortable or compact density. Respects your OS reduced-motion and reduced-transparency settings.
 
 ## MCP server

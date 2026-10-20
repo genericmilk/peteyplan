@@ -40,6 +40,7 @@ import {
   normalizeChecklist,
   type ChecklistItem,
 } from '~/shared/checklist'
+import { accentPalette } from '~/shared/accent'
 import {
   DENSITY_OPTIONS,
   MOTION_OPTIONS,
@@ -336,13 +337,22 @@ function renderDescHtml(input: string): string {
 
 const { prefs, resolvedTheme, motionFactor, toggleTheme } = usePreferences()
 
+/** Favicon SVG source, recoloured to the active board once loaded on the client. */
+const faviconTemplate = ref<string | null>(null)
+const brandInk = ref<string | null>(null)
+const FAVICON_TEMPLATE_COLOR = /#3565e0/gi
+
 useHead(() => ({
   link: [{
     key: 'peteyplan-favicon',
     id: 'peteyplan-favicon',
     rel: 'icon',
     type: 'image/svg+xml',
-    href: import.meta.server ? '/favicon.svg' : `/favicon-${resolvedTheme.value}.svg`,
+    href: import.meta.server
+      ? '/favicon.svg'
+      : faviconTemplate.value && brandInk.value
+        ? 'data:image/svg+xml,' + encodeURIComponent(faviconTemplate.value.replace(FAVICON_TEMPLATE_COLOR, brandInk.value))
+        : `/favicon-${resolvedTheme.value}.svg`,
   }],
 }))
 
@@ -351,9 +361,16 @@ const boards = ref<BoardInfo[]>([])
 const activeBoardId = ref('board-default')
 const activeBoard = computed(() => boards.value.find((entry) => entry.id === activeBoardId.value))
 
-// The ambient backdrop takes the active board's colour (cross-fades via the registered --ambient property).
-watch(() => activeBoard.value?.color, (color) => {
-  if (color && typeof document !== 'undefined') document.documentElement.style.setProperty('--ambient', color)
+// The active board's colour tints the whole UI: ambient backdrop (cross-fades via the
+// registered --ambient property), accent palette, nav logo and favicon.
+watch([() => activeBoard.value?.color, resolvedTheme], ([color, theme]) => {
+  if (!color || typeof document === 'undefined') return
+  const root = document.documentElement
+  root.style.setProperty('--ambient', color)
+  const palette = accentPalette(color, theme)
+  if (!palette) return
+  for (const [name, value] of Object.entries(palette)) root.style.setProperty(name, value)
+  brandInk.value = palette['--brand-ink']
 })
 const switchingBoardId = ref<string | null>(null)
 let boardRequest = 0
@@ -464,6 +481,9 @@ async function refreshBoard() {
   }
 }
 
+/** Total duration of the board-switch slide, shared across every board it passes. */
+const BOARD_SWITCH_MS = 100
+
 async function switchBoard(id: string) {
   cancelPillHover()
   cancelBoardPan?.()
@@ -497,8 +517,14 @@ async function switchBoard(id: string) {
     columnDropIndex.value = null
     releaseDropTarget.value = null
     error.value = null
+    // The whole switch fits in BOARD_SWITCH_MS: each step gets the time that's left, and
+    // intermediate boards are skipped once there isn't enough left to show them.
+    const deadline = performance.now() + BOARD_SWITCH_MS * motionFactor.value
+    const MIN_STEP_MS = 24
     for (const [index, step] of steps.entries()) {
       if (request !== boardRequest) return
+      const stepsLeft = steps.length - index
+      if (stepsLeft > 1 && (deadline - performance.now()) / stepsLeft < MIN_STEP_MS) continue
       const el = boardEl.value
       const snapshot = !reduceMotion && el ? el.cloneNode(true) as HTMLElement : null
       if (snapshot && el) {
@@ -519,7 +545,7 @@ async function switchBoard(id: string) {
       if (el) el.scrollLeft = 0
       if (snapshot && el) {
         const width = el.clientWidth
-        const duration = (steps.length === 1 ? 300 : 180) * motionFactor.value
+        const duration = Math.max(0, (deadline - performance.now()) / stepsLeft)
         const easing = steps.length === 1 ? 'cubic-bezier(.2,.65,.35,1)'
           : index === 0 ? 'cubic-bezier(.45,0,1,1)'
           : index === steps.length - 1 ? 'cubic-bezier(0,0,.55,1)' : 'linear'
@@ -2000,6 +2026,10 @@ watch(boardEl, (el, prev) => {
 
 onMounted(() => {
   initPreferences()
+  fetch('/favicon-light.svg')
+    .then((res) => (res.ok ? res.text() : null))
+    .then((svg) => { faviconTemplate.value = svg })
+    .catch(() => { /* keep the static favicon */ })
   try {
     const stored = JSON.parse(localStorage.getItem(COLLAPSED_CHECKLISTS_KEY) || '[]')
     if (Array.isArray(stored)) collapsedChecklists.value = new Set(stored.filter((id) => typeof id === 'string'))

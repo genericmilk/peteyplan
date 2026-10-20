@@ -262,7 +262,7 @@ body::before {
   background-color: var(--brand-ink);
   -webkit-mask: url('/branding/peteyplan-mark.png') center / contain no-repeat;
   mask: url('/branding/peteyplan-mark.png') center / contain no-repeat;
-  transition: background-color calc(200ms * var(--motion));
+  transition: background-color calc(400ms * var(--motion));
 }
 
 .brand-divider { flex: 0 0 auto; width: 1px; height: 22px; margin: 0 -2px; background: var(--border-strong); }
@@ -2043,7 +2043,7 @@ dialog[open]::backdrop { animation: backdrop-in calc(180ms * var(--motion)) ease
   width: 4px;
   height: 8px;
   margin-top: -2px;
-  border: solid var(--on-accent);
+  border: solid #f8faff;
   border-width: 0 2px 2px 0;
   transform: rotate(45deg) scale(0);
   transition: transform calc(180ms * var(--motion)) var(--ease-out);
