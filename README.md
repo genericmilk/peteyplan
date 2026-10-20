@@ -115,6 +115,7 @@ Return to the latest version with `git checkout main && git pull`.
 
 **Boards and cards**
 - Multiple boards, each with its own emoji and colour. Click a pill in the top bar to switch, or hover a pill while dragging to carry a card or column across.
+- Hover the board list or focus a pill to reveal every name. Inactive pills are greyscale, showing 50% colour on hover. When the list overflows, wheel up scrolls left and wheel down scrolls right, with the scrollbar hidden.
 - Drag-and-drop columns and cards. Cards dropped into **Done** are marked complete and auto-archive after 5 days.
 - Every card gets a stable reference like `PP-12` that works in the UI, API and MCP tools.
 - Optional description (Markdown), Jira key and due date. Sooner due dates float to the top; overdue and due-today dates are highlighted.

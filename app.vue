@@ -1974,6 +1974,25 @@ function onBoardWheel(event: WheelEvent) {
   event.preventDefault()
 }
 
+const boardPillsEl = ref<HTMLElement | null>(null)
+
+function onBoardPillsWheel(event: WheelEvent) {
+  if (event.ctrlKey || event.metaKey) return
+  const el = boardPillsEl.value
+  if (!el || el.scrollWidth <= el.clientWidth + 1) return
+  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+  if (!delta) return
+  const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 32
+    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? el.clientWidth : 1
+  el.scrollLeft = Math.max(0, Math.min(el.scrollWidth - el.clientWidth, el.scrollLeft + delta * unit))
+  event.preventDefault()
+}
+
+watch(boardPillsEl, (el, prev) => {
+  prev?.removeEventListener('wheel', onBoardPillsWheel)
+  el?.addEventListener('wheel', onBoardPillsWheel, { passive: false })
+})
+
 watch(boardEl, (el, prev) => {
   prev?.removeEventListener('wheel', onBoardWheel)
   el?.addEventListener('wheel', onBoardWheel, { passive: false })
@@ -1999,6 +2018,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('dragover', onDocumentDragOver)
   stopEdgeScroll()
   boardEl.value?.removeEventListener('wheel', onBoardWheel)
+  boardPillsEl.value?.removeEventListener('wheel', onBoardPillsWheel)
 })
 </script>
 
@@ -2008,7 +2028,7 @@ onBeforeUnmount(() => {
       <span class="logo" aria-hidden="true"></span>
       <h1 class="sr-only">PeteyPlan</h1>
       <span class="brand-divider" aria-hidden="true"></span>
-      <nav class="board-pills" aria-label="Boards">
+      <nav ref="boardPillsEl" class="board-pills" aria-label="Boards">
         <button
           v-for="entry in boards"
           :key="entry.id"
