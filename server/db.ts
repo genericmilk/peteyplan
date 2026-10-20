@@ -139,7 +139,30 @@ db.prepare(
    WHERE progress = 'done' AND completed_at IS NULL AND archived_at IS NULL`
 ).run(nowIso())
 
-// Seed the default board on first run.
+export const DEFAULT_BOARD_ID = 'board-default'
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS boards (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    color TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0
+  );
+`)
+const firstBoardMigration = !db.prepare('SELECT 1 FROM boards WHERE id = ?').get(DEFAULT_BOARD_ID)
+db.prepare('INSERT OR IGNORE INTO boards (id, name, emoji, color) VALUES (?, ?, ?, ?)').run(
+  DEFAULT_BOARD_ID, 'Default Board', '📋', '#5b8cff'
+)
+for (const table of ['columns', 'releases']) {
+  const fields = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+  if (!fields.some((field) => field.name === 'board_id')) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN board_id TEXT NOT NULL DEFAULT 'board-default'`)
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_board ON ${table} (board_id, position)`)
+}
+
+// Seed only a fresh database, not an intentionally empty default board.
 const DEFAULT_COLUMNS = [
   { id: 'col-backlog', title: 'Backlog' },
   { id: 'col-todo', title: 'To Do' },
@@ -148,11 +171,53 @@ const DEFAULT_COLUMNS = [
 ]
 
 const colCount = db.prepare('SELECT COUNT(*) AS n FROM columns').get() as { n: number }
-if (colCount.n === 0) {
+if (colCount.n === 0 && firstBoardMigration) {
   const insert = db.prepare('INSERT INTO columns (id, title, position) VALUES (?, ?, ?)')
   db.transaction(() => {
     DEFAULT_COLUMNS.forEach((col, i) => insert.run(col.id, col.title, i))
   })()
+}
+
+export interface BoardInfo {
+  id: string
+  name: string
+  emoji: string
+  color: string
+  isDefault: boolean
+}
+
+export function getBoards(): BoardInfo[] {
+  return (db.prepare('SELECT id, name, emoji, color FROM boards ORDER BY position, rowid').all() as
+    Omit<BoardInfo, 'isDefault'>[]).map((board) => ({ ...board, isDefault: board.id === DEFAULT_BOARD_ID }))
+}
+
+export function hasBoard(id: string): boolean {
+  return !!db.prepare('SELECT 1 FROM boards WHERE id = ?').get(id)
+}
+
+export function createBoard(name: string, emoji: string, color: string): BoardInfo {
+  const id = uid('board')
+  const position = (db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS n FROM boards').get() as { n: number }).n
+  db.prepare('INSERT INTO boards (id, name, emoji, color, position) VALUES (?, ?, ?, ?, ?)').run(id, name, emoji, color, position)
+  return { id, name, emoji, color, isDefault: false }
+}
+
+export function updateBoard(id: string, changes: { name?: string; emoji?: string; color?: string }): BoardInfo | undefined {
+  const board = getBoards().find((entry) => entry.id === id)
+  if (!board) return undefined
+  const updated = { ...board, ...changes }
+  db.prepare('UPDATE boards SET name = ?, emoji = ?, color = ? WHERE id = ?').run(updated.name, updated.emoji, updated.color, id)
+  return updated
+}
+
+export function deleteBoard(id: string): boolean {
+  if (id === DEFAULT_BOARD_ID || !hasBoard(id)) return false
+  db.transaction(() => {
+    db.prepare('DELETE FROM columns WHERE board_id = ?').run(id)
+    db.prepare('DELETE FROM releases WHERE board_id = ?').run(id)
+    db.prepare('DELETE FROM boards WHERE id = ?').run(id)
+  })()
+  return true
 }
 
 /* ── Public types ──────────────────────────────────────────────────────────── */
@@ -207,8 +272,9 @@ export interface ArchivedCard extends Card {
   columnTitle: string | null
 }
 
-interface ColumnRow { id: string; title: string; position: number }
+interface ColumnRow { id: string; title: string; position: number; board_id: string }
 interface ReleaseRow {
+  board_id: string
   id: string
   title: string
   week_start: string
@@ -404,21 +470,21 @@ export function resolveCardId(refOrId: string): string {
 
 /* ── Queries ───────────────────────────────────────────────────────────────── */
 
-export function getBoard(): { columns: Column[]; releases: Release[] } {
+export function getBoard(boardId = DEFAULT_BOARD_ID): { columns: Column[]; releases: Release[] } {
   archiveStaleDoneCards()
 
   const columns = db
-    .prepare('SELECT id, title, position FROM columns ORDER BY position ASC, rowid ASC')
-    .all() as ColumnRow[]
+    .prepare('SELECT * FROM columns WHERE board_id = ? ORDER BY position ASC, rowid ASC')
+    .all(boardId) as ColumnRow[]
   const cards = db
     .prepare(
       `SELECT id, column_id, number, title, description, jira_key, due_by, kind, progress, position,
               completed_at, archived_at, release_id, viewed_at
        FROM cards
-       WHERE archived_at IS NULL
+       WHERE archived_at IS NULL AND column_id IN (SELECT id FROM columns WHERE board_id = ?)
        ORDER BY ${CARD_ORDER_SQL}`
     )
-    .all() as CardRow[]
+    .all(boardId) as CardRow[]
 
   const byColumn = new Map<string, Card[]>()
   const cardById = new Map<string, Card>()
@@ -436,13 +502,13 @@ export function getBoard(): { columns: Column[]; releases: Release[] } {
       title: col.title,
       cards: byColumn.get(col.id) || [],
     })),
-    releases: getReleases(cardById),
+    releases: getReleases(cardById, boardId),
   }
 }
 
 export function getRelease(id: string): ReleaseRow | undefined {
   return db
-    .prepare('SELECT id, title, week_start, preprod_key, prod_key, position FROM releases WHERE id = ?')
+    .prepare('SELECT * FROM releases WHERE id = ?')
     .get(id) as ReleaseRow | undefined
 }
 
@@ -450,14 +516,15 @@ export function getCardRow(id: string): CardRow | undefined {
   return db.prepare('SELECT * FROM cards WHERE id = ?').get(id) as CardRow | undefined
 }
 
-export function getReleases(cardById?: Map<string, Card>): Release[] {
+export function getReleases(cardById?: Map<string, Card>, boardId = DEFAULT_BOARD_ID): Release[] {
   const rows = db
     .prepare(
-      `SELECT id, title, week_start, preprod_key, prod_key, position
+      `SELECT *
        FROM releases
+       WHERE board_id = ?
        ORDER BY week_start ASC, position ASC, rowid ASC`
     )
-    .all() as ReleaseRow[]
+    .all(boardId) as ReleaseRow[]
 
   let cardsMap = cardById
   if (!cardsMap) {
@@ -485,15 +552,15 @@ export function getReleases(cardById?: Map<string, Card>): Release[] {
 }
 
 /** First unused Monday on/after today (or after the latest existing release). */
-export function suggestNextWeekStart(): string {
+export function suggestNextWeekStart(boardId = DEFAULT_BOARD_ID): string {
   const latest = db
-    .prepare('SELECT week_start FROM releases ORDER BY week_start DESC LIMIT 1')
-    .get() as { week_start: string } | undefined
+    .prepare('SELECT week_start FROM releases WHERE board_id = ? ORDER BY week_start DESC LIMIT 1')
+    .get(boardId) as { week_start: string } | undefined
   let candidate = nextMondayIso()
   if (latest?.week_start && latest.week_start >= candidate) {
     candidate = mondayAfter(latest.week_start)
   }
-  while (db.prepare('SELECT 1 FROM releases WHERE week_start = ?').get(candidate)) {
+  while (db.prepare('SELECT 1 FROM releases WHERE week_start = ? AND board_id = ?').get(candidate, boardId)) {
     candidate = mondayAfter(candidate)
   }
   return candidate
@@ -504,14 +571,15 @@ export function addRelease(input: {
   weekStart?: string
   preprodKey?: string
   prodKey?: string
-}): Release {
+}, boardId = DEFAULT_BOARD_ID): Release {
   const weekStart = input.weekStart && /^\d{4}-\d{2}-\d{2}$/.test(input.weekStart)
     ? input.weekStart
-    : suggestNextWeekStart()
+    : suggestNextWeekStart(boardId)
   const title = (input.title || '').trim() || defaultReleaseTitle(weekStart)
   const position =
     (db.prepare('SELECT COALESCE(MAX(position), -1) AS m FROM releases').get() as { m: number }).m + 1
   const row: ReleaseRow = {
+    board_id: boardId,
     id: uid('rel'),
     title,
     week_start: weekStart,
@@ -520,9 +588,9 @@ export function addRelease(input: {
     position,
   }
   db.prepare(
-    `INSERT INTO releases (id, title, week_start, preprod_key, prod_key, position)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(row.id, row.title, row.week_start, row.preprod_key, row.prod_key, row.position)
+    `INSERT INTO releases (id, title, week_start, preprod_key, prod_key, position, board_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(row.id, row.title, row.week_start, row.preprod_key, row.prod_key, row.position, boardId)
   return toRelease(row, [])
 }
 
@@ -551,7 +619,7 @@ export function updateRelease(
   ).run(title, week_start, preprod_key, prod_key, id)
 
   const updated = getRelease(id)!
-  const cards = getReleases().find((r) => r.id === id)?.cards || []
+  const cards = getReleases(undefined, existing.board_id).find((r) => r.id === id)?.cards || []
   return toRelease(updated, cards)
 }
 
@@ -567,12 +635,12 @@ export function deleteRelease(id: string): boolean {
 export function setCardRelease(cardId: string, releaseId: string | null): CardRow | undefined {
   const existing = db.prepare('SELECT * FROM cards WHERE id = ?').get(cardId) as CardRow | undefined
   if (!existing || existing.archived_at) return undefined
-  if (releaseId && !getRelease(releaseId)) return undefined
+  if (releaseId && getRelease(releaseId)?.board_id !== getColumn(existing.column_id)?.board_id) return undefined
   db.prepare('UPDATE cards SET release_id = ? WHERE id = ?').run(releaseId, cardId)
   return db.prepare('SELECT * FROM cards WHERE id = ?').get(cardId) as CardRow
 }
 
-export function getArchivedCards(): ArchivedCard[] {
+export function getArchivedCards(boardId = DEFAULT_BOARD_ID): ArchivedCard[] {
   archiveStaleDoneCards()
 
   const rows = db
@@ -581,10 +649,10 @@ export function getArchivedCards(): ArchivedCard[] {
               c.position, c.completed_at, c.archived_at, c.release_id, c.viewed_at, col.title AS column_title
        FROM cards c
        LEFT JOIN columns col ON col.id = c.column_id
-       WHERE c.archived_at IS NOT NULL
+       WHERE c.archived_at IS NOT NULL AND col.board_id = ?
        ORDER BY c.archived_at DESC, c.rowid DESC`
     )
-    .all() as (CardRow & { column_title: string | null })[]
+    .all(boardId) as (CardRow & { column_title: string | null })[]
 
   return rows.map((row) => ({
     ...toCard(row),
@@ -593,15 +661,15 @@ export function getArchivedCards(): ArchivedCard[] {
 }
 
 export function getColumn(id: string): ColumnRow | undefined {
-  return db.prepare('SELECT id, title, position FROM columns WHERE id = ?').get(id) as ColumnRow | undefined
+  return db.prepare('SELECT * FROM columns WHERE id = ?').get(id) as ColumnRow | undefined
 }
 
 /* ── Column mutations ─────────────────────────────────────────────────────── */
 
-export function addColumn(title: string): Column {
-  const col: ColumnRow = { id: uid('col'), title, position: 0 }
-  col.position = (db.prepare('SELECT COALESCE(MAX(position), -1) AS m FROM columns').get() as { m: number }).m + 1
-  db.prepare('INSERT INTO columns (id, title, position) VALUES (?, ?, ?)').run(col.id, col.title, col.position)
+export function addColumn(title: string, boardId = DEFAULT_BOARD_ID): Column {
+  const col: ColumnRow = { id: uid('col'), title, position: 0, board_id: boardId }
+  col.position = (db.prepare('SELECT COALESCE(MAX(position), -1) AS m FROM columns WHERE board_id = ?').get(boardId) as { m: number }).m + 1
+  db.prepare('INSERT INTO columns (id, title, position, board_id) VALUES (?, ?, ?, ?)').run(col.id, col.title, col.position, boardId)
   return { id: col.id, title: col.title, cards: [] }
 }
 
@@ -631,12 +699,13 @@ export function clearColumnCards(columnId: string): boolean {
  * Sets the full left-to-right column order. `orderedIds` must be the complete
  * list of column ids (client truth after a drag & drop).
  */
-export function reorderColumns(orderedIds: string[]): boolean {
+export function reorderColumns(orderedIds: string[], boardId = DEFAULT_BOARD_ID): boolean {
   if (orderedIds.length === 0) return false
 
-  const existing = db.prepare('SELECT id FROM columns').all() as { id: string }[]
+  const existing = db.prepare('SELECT id FROM columns WHERE board_id = ?').all(boardId) as { id: string }[]
   const existingIds = new Set(existing.map((row) => row.id))
   if (orderedIds.length !== existingIds.size) return false
+  if (new Set(orderedIds).size !== orderedIds.length) return false
   if (!orderedIds.every((id) => existingIds.has(id))) return false
 
   const update = db.prepare('UPDATE columns SET position = ? WHERE id = ?')
@@ -745,7 +814,7 @@ export function updateCard(
   const completed_at = resolveCompletedAt(progress, existing.progress, existing.completed_at)
   let release_id = existing.release_id
   if (changes.releaseId !== undefined) {
-    if (changes.releaseId && !getRelease(changes.releaseId)) return undefined
+    if (changes.releaseId && getRelease(changes.releaseId)?.board_id !== getColumn(existing.column_id)?.board_id) return undefined
     release_id = changes.releaseId
   }
   const viewed_at =
@@ -784,7 +853,7 @@ export function restoreCard(id: string, columnId?: string): CardRow | undefined 
   if (!existing || !existing.archived_at) return undefined
 
   const targetColumnId = columnId || existing.column_id
-  if (!getColumn(targetColumnId)) {
+  if (!getColumn(targetColumnId) || getColumn(targetColumnId)?.board_id !== getColumn(existing.column_id)?.board_id) {
     return undefined
   }
 
@@ -832,6 +901,11 @@ export function deleteCard(id: string): boolean {
 export function reorderCards(columnId: string, orderedIds: string[]): boolean {
   const column = getColumn(columnId)
   if (!column) return false
+  if (new Set(orderedIds).size !== orderedIds.length) return false
+  if (!orderedIds.every((id) => {
+    const card = getCardRow(id)
+    return card && !card.archived_at && getColumn(card.column_id)?.board_id === column.board_id
+  })) return false
   const markDone = column.title.trim().toLowerCase() === 'done'
   const completedAt = nowIso()
 
@@ -852,5 +926,49 @@ export function reorderCards(columnId: string, orderedIds: string[]): boolean {
   })
   tx()
   rerankColumnByDue(columnId)
+  return true
+}
+
+export function transferBoardItem(
+  fromBoardId: string,
+  toBoardId: string,
+  type: 'card' | 'column',
+  itemId: string,
+  targetColumnId?: string,
+  targetPosition?: number
+): boolean | 'missing-target-column' {
+  if (!hasBoard(fromBoardId) || !hasBoard(toBoardId)) return false
+  const card = type === 'card' ? getCardRow(resolveCardId(itemId)) : undefined
+  const source = getColumn(card ? card.column_id : itemId)
+  if (!source || source.board_id !== fromBoardId || (type === 'card' && (!card || card.archived_at))) return false
+  if (type === 'column') {
+    db.transaction(() => {
+      const ids = (db.prepare('SELECT id FROM columns WHERE board_id = ? AND id != ? ORDER BY position, rowid')
+        .all(toBoardId, source.id) as { id: string }[]).map((col) => col.id)
+      ids.splice(Math.min(targetPosition ?? ids.length, ids.length), 0, source.id)
+      db.prepare('UPDATE columns SET board_id = ? WHERE id = ?').run(toBoardId, source.id)
+      if (fromBoardId !== toBoardId) {
+        db.prepare('UPDATE cards SET release_id = NULL WHERE column_id = ?').run(source.id)
+      }
+      reorderColumns(ids, toBoardId)
+    })()
+    return true
+  }
+  let destination = targetColumnId ? getColumn(targetColumnId) : undefined
+  if (targetColumnId && (!destination || destination.board_id !== toBoardId)) return 'missing-target-column'
+  if (!destination && db.prepare('SELECT 1 FROM columns WHERE board_id = ?').get(toBoardId)) return 'missing-target-column'
+  const moved = card!
+  db.transaction(() => {
+    if (!destination) destination = getColumn(addColumn('To Do', toBoardId).id)!
+    const target = destination
+    const ids = (db.prepare('SELECT id FROM cards WHERE column_id = ? AND archived_at IS NULL AND id != ? ORDER BY position, rowid')
+      .all(target.id, moved.id) as { id: string }[]).map((entry) => entry.id)
+    ids.splice(Math.min(targetPosition ?? ids.length, ids.length), 0, moved.id)
+    db.prepare('UPDATE cards SET column_id = ?, release_id = ? WHERE id = ?').run(
+      target.id, fromBoardId === toBoardId ? moved.release_id : null, moved.id
+    )
+    reorderCards(target.id, ids)
+    rerankColumnByDue(source.id)
+  })()
   return true
 }

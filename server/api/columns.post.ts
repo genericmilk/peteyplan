@@ -1,4 +1,5 @@
 import { addColumn } from '../db'
+import { requestBoardId } from '../utils/board'
 
 export default defineEventHandler(async (event) => {
   const body = await readBody<{ title?: unknown }>(event)
@@ -6,5 +7,5 @@ export default defineEventHandler(async (event) => {
   if (!title) {
     throw createError({ statusCode: 400, statusMessage: 'Column title is required' })
   }
-  return addColumn(title)
+  return addColumn(title, requestBoardId(event))
 })

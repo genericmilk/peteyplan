@@ -1,5 +1,6 @@
 import { addRelease } from '../db'
 import { normalizeJiraKey } from '../utils/jira'
+import { requestBoardId } from '../utils/board'
 
 export default defineEventHandler(async (event) => {
   const body = await readBody<{
@@ -24,5 +25,5 @@ export default defineEventHandler(async (event) => {
     weekStart: weekStart || undefined,
     preprodKey,
     prodKey,
-  })
+  }, requestBoardId(event))
 })

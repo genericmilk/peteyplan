@@ -1,5 +1,6 @@
 import { getArchivedCards } from '../db'
+import { requestBoardId } from '../utils/board'
 
-export default defineEventHandler(() => {
-  return { cards: getArchivedCards() }
+export default defineEventHandler((event) => {
+  return { cards: getArchivedCards(requestBoardId(event)) }
 })

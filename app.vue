@@ -42,6 +42,7 @@ interface Release {
   cards: Card[]
 }
 interface Board { columns: Column[]; releases: Release[] }
+interface BoardInfo { id: string; name: string; emoji: string; color: string; isDefault: boolean }
 interface ArchivedCard {
   id: string
   number: number
@@ -297,6 +298,16 @@ function renderDescHtml(input: string): string {
 /* ── State ─────────────────────────────────────────────────────────────────── */
 
 const board = ref<Board>({ columns: [], releases: [] })
+const boards = ref<BoardInfo[]>([])
+const activeBoardId = ref('board-default')
+const activeBoard = computed(() => boards.value.find((entry) => entry.id === activeBoardId.value))
+const switchingBoardId = ref<string | null>(null)
+let boardRequest = 0
+let boardRefreshRequest = 0
+let cancelBoardPan: (() => void) | null = null
+const dragSourceBoardId = ref<string | null>(null)
+const dragSourceColumn = ref<Column | null>(null)
+const foreignDrag = computed(() => !!dragSourceBoardId.value && dragSourceBoardId.value !== activeBoardId.value)
 const loading = ref(true)
 const error = ref<string | null>(null)
 const searchQuery = ref('')
@@ -327,15 +338,13 @@ function cardMatchesQuery(card: Card, q: string): boolean {
 /** Columns with cards filtered by the live search query (view-only). */
 const displayColumns = computed(() => {
   const q = searchQuery.value.trim().toLowerCase()
-  if (!q) {
-    return board.value.columns.map((col) => ({
-      ...col,
-      totalCount: col.cards.length,
-    }))
-  }
-  return board.value.columns.map((col) => ({
+  const columns = [...board.value.columns]
+  // Keep the native drag source mounted while showing a different board.
+  if (foreignDrag.value && dragSourceColumn.value) columns.push(dragSourceColumn.value)
+  return columns.map((col) => ({
     ...col,
-    cards: col.cards.filter((c) => cardMatchesQuery(c, q)),
+    parked: foreignDrag.value && col.id === dragSourceColumn.value?.id,
+    cards: q ? col.cards.filter((c) => cardMatchesQuery(c, q)) : col.cards,
     totalCount: col.cards.length,
   }))
 })
@@ -343,6 +352,9 @@ const displayColumns = computed(() => {
 /* ── API client ────────────────────────────────────────────────────────────── */
 
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
+  if (/^\/api\/(?:board|archive|columns|releases)(?:\/|$)/.test(url)) {
+    url += `${url.includes('?') ? '&' : '?'}boardId=${encodeURIComponent(activeBoardId.value)}`
+  }
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
     ...options,
@@ -368,6 +380,10 @@ function normalizeBoard(data: Board): Board {
 async function loadBoard() {
   loading.value = true
   try {
+    boards.value = (await api<{ boards: BoardInfo[] }>('/api/boards')).boards
+    const saved = localStorage.getItem('peteyplan-board')
+    activeBoardId.value = boards.value.find((entry) => entry.id === saved)?.id
+      ?? boards.value.find((entry) => entry.isDefault)!.id
     board.value = normalizeBoard(await api<Board>('/api/board'))
     error.value = null
   } catch (err) {
@@ -378,12 +394,107 @@ async function loadBoard() {
 }
 
 async function refreshBoard() {
+  const id = activeBoardId.value
+  const request = ++boardRefreshRequest
+  const switchRequest = boardRequest
   try {
-    board.value = normalizeBoard(await api<Board>('/api/board'))
+    const data = await api<Board>('/api/board')
+    if (id !== activeBoardId.value || request !== boardRefreshRequest || switchRequest !== boardRequest) return
+    board.value = normalizeBoard(data)
     error.value = null
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to save'
+    if (id === activeBoardId.value && request === boardRefreshRequest && switchRequest === boardRequest) {
+      error.value = err instanceof Error ? err.message : 'Failed to save'
+    }
   }
+}
+
+async function switchBoard(id: string) {
+  cancelPillHover()
+  cancelBoardPan?.()
+  if (id === activeBoardId.value) {
+    ++boardRequest
+    switchingBoardId.value = null
+    return
+  }
+  const request = ++boardRequest
+  switchingBoardId.value = id
+  const fromIndex = boards.value.findIndex((entry) => entry.id === activeBoardId.value)
+  const toIndex = boards.value.findIndex((entry) => entry.id === id)
+  const direction = toIndex > fromIndex ? 1 : -1
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const route = fromIndex < 0 || reduceMotion
+    ? boards.value.filter((entry) => entry.id === id)
+    : boards.value.filter((_, index) => direction > 0
+      ? index > fromIndex && index <= toIndex
+      : index < fromIndex && index >= toIndex)
+  if (direction < 0 && !reduceMotion) route.reverse()
+  try {
+    const steps = await Promise.all(route.map(async (entry) => ({
+      entry,
+      data: normalizeBoard(await api<Board>(`/api/board?boardId=${encodeURIComponent(entry.id)}`)),
+    })))
+    if (request !== boardRequest) return
+    closeBoardMenu()
+    closeColumnMenu()
+    searchQuery.value = ''
+    dropIndicator.value = null
+    columnDropIndex.value = null
+    releaseDropTarget.value = null
+    error.value = null
+    for (const [index, step] of steps.entries()) {
+      if (request !== boardRequest) return
+      const el = boardEl.value
+      const snapshot = !reduceMotion && el ? el.cloneNode(true) as HTMLElement : null
+      if (snapshot && el) {
+        snapshot.classList.add('board-pan-snapshot')
+        snapshot.setAttribute('aria-hidden', 'true')
+        snapshot.inert = true
+        snapshot.removeAttribute('aria-label')
+        snapshot.querySelectorAll('[id]').forEach((node) => node.removeAttribute('id'))
+        snapshot.querySelectorAll('.drag-source-parked').forEach((node) => node.remove())
+        el.parentElement?.append(snapshot)
+        snapshot.scrollLeft = el.scrollLeft
+      }
+      activeBoardId.value = step.entry.id
+      board.value = step.data
+      localStorage.setItem('peteyplan-board', step.entry.id)
+      await nextTick()
+      if (request !== boardRequest) { snapshot?.remove(); return }
+      if (el) el.scrollLeft = 0
+      if (snapshot && el) {
+        const width = el.clientWidth
+        const duration = steps.length === 1 ? 300 : 180
+        const easing = steps.length === 1 ? 'cubic-bezier(.2,.65,.35,1)'
+          : index === 0 ? 'cubic-bezier(.45,0,1,1)'
+          : index === steps.length - 1 ? 'cubic-bezier(0,0,.55,1)' : 'linear'
+        await new Promise<void>((resolve) => {
+          const outgoing = snapshot.animate([
+            { transform: 'translateX(0)' },
+            { transform: `translateX(${-direction * width}px)` },
+          ], { duration, easing, fill: 'forwards' })
+          const incoming = el.animate([
+            { transform: `translateX(${direction * width}px)` },
+            { transform: 'translateX(0)' },
+          ], { duration, easing, fill: 'forwards' })
+          const finish = () => {
+            outgoing.onfinish = null
+            incoming.onfinish = null
+            outgoing.cancel()
+            incoming.cancel()
+            snapshot.remove()
+            cancelBoardPan = null
+            resolve()
+          }
+          cancelBoardPan = finish
+          incoming.onfinish = finish
+        })
+      }
+    }
+  } catch (err) {
+    if (request === boardRequest) fail(err)
+  }
+  finally { if (request === boardRequest) switchingBoardId.value = null }
 }
 
 function fail(err: unknown) {
@@ -515,7 +626,7 @@ function syncReleaseCardsFromBoard() {
 }
 
 function onReleaseDragOver(event: DragEvent, releaseId: string) {
-  if (isSearching.value || !dragged.value || draggedColumnId.value) return
+  if (isSearching.value || foreignDrag.value || !dragged.value || draggedColumnId.value) return
   event.preventDefault()
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
   releaseDropTarget.value = releaseId
@@ -529,6 +640,7 @@ function onReleaseDragLeave(event: DragEvent) {
 }
 
 function onReleaseDrop(event: DragEvent, releaseId: string) {
+  if (foreignDrag.value) return
   event.preventDefault()
   event.stopPropagation()
   const d = dragged.value
@@ -536,11 +648,7 @@ function onReleaseDrop(event: DragEvent, releaseId: string) {
   if (d) {
     assignCardToRelease(d.cardId, releaseId)
   }
-  document.removeEventListener('dragover', onDocumentDragOver)
-  stopEdgeScroll()
-  dragged.value = null
-  draggingId.value = null
-  dropIndicator.value = null
+  finishDrag()
 }
 
 /* ── Column actions ────────────────────────────────────────────────────────── */
@@ -769,6 +877,65 @@ const dropIndicator = ref<{ columnId: string; index: number } | null>(null)
 
 const draggedColumnId = ref<string | null>(null)
 const columnDropIndex = ref<number | null>(null)
+const pillHoverId = ref<string | null>(null)
+let pillHoverTimer: ReturnType<typeof setTimeout> | null = null
+
+function cancelPillHover() {
+  if (pillHoverTimer !== null) clearTimeout(pillHoverTimer)
+  pillHoverTimer = null
+  pillHoverId.value = null
+}
+
+function onPillDragOver(event: DragEvent, id: string) {
+  if (!dragged.value && !draggedColumnId.value) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  stopEdgeScroll()
+  if (id === activeBoardId.value || pillHoverId.value === id || switchingBoardId.value === id) return
+  cancelPillHover()
+  pillHoverId.value = id
+  pillHoverTimer = setTimeout(() => switchBoard(id), 350)
+}
+
+function finishDrag() {
+  cancelPillHover()
+  document.removeEventListener('dragover', onDocumentDragOver)
+  stopEdgeScroll()
+  dragged.value = null
+  draggingId.value = null
+  draggedColumnId.value = null
+  dropIndicator.value = null
+  columnDropIndex.value = null
+  releaseDropTarget.value = null
+  dragSourceBoardId.value = null
+  dragSourceColumn.value = null
+}
+
+async function transferDraggedItem(type: 'card' | 'column', itemId: string, targetColumnId?: string, targetPosition?: number) {
+  const fromBoardId = dragSourceBoardId.value
+  const toBoardId = activeBoardId.value
+  finishDrag()
+  try {
+    await api(`/api/boards/${toBoardId}/items`, {
+      method: 'POST',
+      body: JSON.stringify({ fromBoardId, type, itemId, targetColumnId, targetPosition }),
+    })
+    await refreshBoard()
+  } catch (err) { fail(err) }
+}
+
+async function onPillDrop(event: DragEvent, id: string) {
+  if (!dragged.value && !draggedColumnId.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  const type = draggedColumnId.value ? 'column' : 'card'
+  const itemId = draggedColumnId.value ?? dragged.value!.cardId
+  const fromBoardId = dragSourceBoardId.value
+  await switchBoard(id)
+  if (activeBoardId.value !== id) { finishDrag(); return }
+  dragSourceBoardId.value = fromBoardId
+  await transferDraggedItem(type, itemId, type === 'card' ? board.value.columns[0]?.id : undefined)
+}
 
 const EDGE_SCROLL_ZONE = 72
 const EDGE_SCROLL_MAX = 28
@@ -842,6 +1009,8 @@ function onCardDragStart(event: DragEvent, columnId: string, card: Card) {
   event.dataTransfer.setData('application/x-petey-card', card.id)
   event.dataTransfer.effectAllowed = 'move'
   dragged.value = { cardId: card.id, columnId }
+  dragSourceBoardId.value = activeBoardId.value
+  dragSourceColumn.value = findColumn(columnId)!
   draggingId.value = card.id
   draggedColumnId.value = null
   columnDropIndex.value = null
@@ -849,12 +1018,7 @@ function onCardDragStart(event: DragEvent, columnId: string, card: Card) {
 }
 
 function onCardDragEnd() {
-  document.removeEventListener('dragover', onDocumentDragOver)
-  stopEdgeScroll()
-  dragged.value = null
-  draggingId.value = null
-  dropIndicator.value = null
-  releaseDropTarget.value = null
+  finishDrag()
 }
 
 function onColumnHeaderDragStart(event: DragEvent, column: Column) {
@@ -868,6 +1032,8 @@ function onColumnHeaderDragStart(event: DragEvent, column: Column) {
   event.dataTransfer.setData('application/x-petey-column', column.id)
   event.dataTransfer.effectAllowed = 'move'
   draggedColumnId.value = column.id
+  dragSourceBoardId.value = activeBoardId.value
+  dragSourceColumn.value = findColumn(column.id)!
   columnDropIndex.value = null
   dragged.value = null
   draggingId.value = null
@@ -876,10 +1042,7 @@ function onColumnHeaderDragStart(event: DragEvent, column: Column) {
 }
 
 function onColumnHeaderDragEnd() {
-  document.removeEventListener('dragover', onDocumentDragOver)
-  stopEdgeScroll()
-  draggedColumnId.value = null
-  columnDropIndex.value = null
+  finishDrag()
 }
 
 function onColumnDragOver(event: DragEvent, column: Column) {
@@ -914,25 +1077,32 @@ function onColumnDragLeave(event: DragEvent) {
 
 function onColumnDrop(event: DragEvent, column: Column) {
   event.preventDefault()
+  if (draggedColumnId.value) return
+  event.stopPropagation()
   const d = dragged.value
   const indicator = dropIndicator.value
+  if (d && foreignDrag.value) {
+    transferDraggedItem('card', d.cardId, column.id, indicator?.index ?? column.cards.length)
+    return
+  }
   if (d && indicator && indicator.columnId === column.id) {
     moveCard(d.cardId, column.id, indicator.index)
   }
-  document.removeEventListener('dragover', onDocumentDragOver)
-  stopEdgeScroll()
-  dragged.value = null
-  draggingId.value = null
-  dropIndicator.value = null
+  finishDrag()
 }
 
 function onBoardDragOver(event: DragEvent) {
+  if (foreignDrag.value && dragged.value && board.value.columns.length === 0) {
+    event.preventDefault()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    return
+  }
   if (!draggedColumnId.value) return
   event.preventDefault()
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
 
   const boardEl = event.currentTarget as HTMLElement
-  const colEls = Array.from(boardEl.querySelectorAll<HTMLElement>('.column:not(.column-placeholder)')).filter(
+  const colEls = Array.from(boardEl.querySelectorAll<HTMLElement>('.column:not(.column-placeholder):not(.drag-source-parked)')).filter(
     (el) => el.dataset.id !== draggedColumnId.value
   )
 
@@ -956,15 +1126,20 @@ function onBoardDragLeave(event: DragEvent) {
 
 function onBoardDrop(event: DragEvent) {
   event.preventDefault()
+  if (foreignDrag.value && dragged.value && board.value.columns.length === 0) {
+    transferDraggedItem('card', dragged.value.cardId)
+    return
+  }
   const columnId = draggedColumnId.value
   const index = columnDropIndex.value
+  if (columnId && foreignDrag.value) {
+    transferDraggedItem('column', columnId, undefined, index ?? board.value.columns.length)
+    return
+  }
   if (columnId != null && index != null) {
     moveColumn(columnId, index)
   }
-  document.removeEventListener('dragover', onDocumentDragOver)
-  stopEdgeScroll()
-  draggedColumnId.value = null
-  columnDropIndex.value = null
+  finishDrag()
 }
 
 async function moveCard(cardId: string, toColumnId: string, index: number) {
@@ -1343,6 +1518,50 @@ const boardMenu = ref<{ top: number; right: number } | null>(null)
 const archiveDialogEl = ref<HTMLDialogElement | null>(null)
 const archivedCards = ref<ArchivedCard[]>([])
 const archiveLoading = ref(false)
+const settingsDialogEl = ref<HTMLDialogElement | null>(null)
+const boardDrafts = ref<BoardInfo[]>([])
+const newBoard = ref({ name: '', emoji: '📋', color: '#5b8cff' })
+const settingsBusy = ref(false)
+
+function openSettings() {
+  closeBoardMenu()
+  boardDrafts.value = boards.value.map((entry) => ({ ...entry }))
+  settingsDialogEl.value?.showModal()
+}
+
+async function saveBoardSettings(draft: { name: string; emoji: string; color: string }, id?: string) {
+  settingsBusy.value = true
+  try {
+    const saved = await api<BoardInfo>(id ? `/api/boards/${id}` : '/api/boards', {
+      method: id ? 'PATCH' : 'POST',
+      body: JSON.stringify(draft),
+    })
+    if (id) {
+      boards.value = boards.value.map((entry) => entry.id === id ? saved : entry)
+      boardDrafts.value = boardDrafts.value.map((entry) => entry.id === id ? { ...saved } : entry)
+    } else {
+      boards.value.push(saved)
+      boardDrafts.value.push({ ...saved })
+      newBoard.value = { name: '', emoji: '📋', color: '#5b8cff' }
+    }
+    error.value = null
+  } catch (err) { fail(err) }
+  finally { settingsBusy.value = false }
+}
+
+async function removeBoard(entry: BoardInfo) {
+  if (entry.isDefault || !window.confirm(`Delete "${entry.name}" and all its columns, cards, archived cards, and releases? This cannot be undone.`)) return
+  settingsBusy.value = true
+  try {
+    await api(`/api/boards/${entry.id}`, { method: 'DELETE' })
+    boards.value = boards.value.filter((board) => board.id !== entry.id)
+    boardDrafts.value = boardDrafts.value.filter((board) => board.id !== entry.id)
+    if (activeBoardId.value === entry.id) {
+      await switchBoard(boards.value.find((board) => board.isDefault)!.id)
+    }
+  } catch (err) { fail(err) }
+  finally { settingsBusy.value = false }
+}
 
 function openBoardMenu(event: MouseEvent) {
   closeColumnMenu()
@@ -1488,6 +1707,9 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  ++boardRequest
+  cancelBoardPan?.()
+  cancelPillHover()
   document.removeEventListener('mousedown', onDocumentMousedown)
   document.removeEventListener('dragover', onDocumentDragOver)
   stopEdgeScroll()
@@ -1500,6 +1722,28 @@ onBeforeUnmount(() => {
     <div class="brand">
       <span class="logo"></span>
       <h1>PeteyPlan</h1>
+      <nav class="board-pills" aria-label="Boards">
+        <button
+          v-for="entry in boards"
+          :key="entry.id"
+          type="button"
+          class="board-pill"
+          :class="{ active: entry.id === activeBoardId, 'drag-hover': pillHoverId === entry.id, switching: switchingBoardId === entry.id }"
+          :style="{ '--board-color': entry.color }"
+          :aria-label="entry.name"
+          :disabled="loading"
+          :aria-pressed="entry.id === activeBoardId"
+          :title="entry.name + ' — drag a card or column here to switch boards'"
+          @click="switchBoard(entry.id)"
+          @dragover="onPillDragOver($event, entry.id)"
+          @dragleave="!($event.currentTarget as HTMLElement).contains($event.relatedTarget as Node | null) && cancelPillHover()"
+          @drop="onPillDrop($event, entry.id)"
+        >
+          <span class="board-pill-emoji" aria-hidden="true">{{ entry.emoji }}</span>
+          <span class="board-pill-name" aria-hidden="true">{{ entry.name }}</span>
+        </button>
+      </nav>
+      <span class="sr-only" aria-live="polite">{{ activeBoard?.name }}</span>
     </div>
     <div class="topbar-actions">
       <label class="topbar-search">
@@ -1520,7 +1764,7 @@ onBeforeUnmount(() => {
         aria-controls="releases-panel"
         @click="toggleReleasesPanel"
       >Releases</button>
-      <button class="btn btn-primary" @click="openColumnDialog(null)">+ Add Column</button>
+      <button class="btn btn-primary" :disabled="loading || !!switchingBoardId" @click="openColumnDialog(null)">+ Add Column</button>
       <button
         class="btn-icon board-menu-btn"
         :class="{ 'menu-open': !!boardMenu }"
@@ -1650,20 +1894,22 @@ onBeforeUnmount(() => {
 
   <main v-if="loading" class="board-loading">Loading board…</main>
 
+  <div v-else class="board-viewport">
   <main
-    v-else
     ref="boardEl"
     class="board"
-    aria-label="Kanban board"
+    :aria-label="activeBoard?.name ?? 'Kanban board'"
+    :aria-busy="!!switchingBoardId"
     @dragover.prevent="onBoardDragOver"
     @dragleave="onBoardDragLeave"
     @drop.prevent="onBoardDrop"
   >
     <template v-for="(col, colIndex) in displayColumns" :key="col.id">
-      <div v-if="isColumnDropIndicator(colIndex)" class="column column-placeholder" aria-hidden="true"></div>
+      <div v-if="!col.parked && isColumnDropIndicator(colIndex)" class="column column-placeholder" aria-hidden="true"></div>
       <section
         class="column"
-        :class="{ dragging: draggedColumnId === col.id }"
+        :class="{ dragging: draggedColumnId === col.id, 'drag-source-parked': col.parked }"
+        :aria-hidden="col.parked || undefined"
         :data-id="col.id"
       >
       <div
@@ -1815,7 +2061,44 @@ onBeforeUnmount(() => {
       class="column column-placeholder"
       aria-hidden="true"
     ></div>
+    <div v-if="board.columns.length === 0" class="board-empty">
+      <h2>{{ activeBoard?.emoji }} {{ activeBoard?.name }}</h2>
+      <p>{{ foreignDrag && dragged ? 'Drop your card here to create a To Do column.' : 'A fresh space for your work. Add a column or drag one here from another board.' }}</p>
+      <button class="btn btn-primary" @click="openColumnDialog(null)">+ Add Column</button>
+    </div>
   </main>
+  </div>
+
+  <dialog ref="settingsDialogEl" class="settings-dialog" aria-labelledby="board-settings-title" @cancel="settingsBusy && $event.preventDefault()">
+    <div class="dialog-form">
+      <h2 id="board-settings-title">Board settings</h2>
+      <p class="settings-hint">Choose a name, emoji and colour for each board. The default board can be edited but never deleted.</p>
+      <p v-if="error" class="settings-error" role="alert">{{ error }}</p>
+      <form
+        v-for="draft in boardDrafts"
+        :key="draft.id"
+        class="board-settings-row"
+        @submit.prevent="saveBoardSettings(draft, draft.id)"
+      >
+        <BoardEmojiPicker v-model="draft.emoji" :label="'Emoji for ' + draft.name" :disabled="settingsBusy" />
+        <label class="board-name-field">Name<input v-model="draft.name" :aria-label="'Name for ' + draft.name" required maxlength="60" /></label>
+        <label>Colour<input v-model="draft.color" :aria-label="'Colour for ' + draft.name" type="color" required /></label>
+        <button class="btn" :disabled="settingsBusy" type="submit">Save</button>
+        <button class="btn btn-danger" :disabled="settingsBusy || draft.isDefault" :title="draft.isDefault ? 'The default board cannot be deleted' : 'Delete board and all its contents'" type="button" @click="removeBoard(draft)">Delete</button>
+      </form>
+      <form class="board-settings-row new-board-form" @submit.prevent="saveBoardSettings(newBoard)">
+        <h3>New board</h3>
+        <BoardEmojiPicker v-model="newBoard.emoji" label="New board emoji" :disabled="settingsBusy" />
+        <label class="board-name-field">Name<input v-model="newBoard.name" aria-label="New board name" placeholder="Board name" required maxlength="60" /></label>
+        <label>Colour<input v-model="newBoard.color" aria-label="New board colour" type="color" required /></label>
+        <button class="btn btn-primary" :disabled="settingsBusy" type="submit">Create board</button>
+      </form>
+      <div class="dialog-actions">
+        <span class="spacer"></span>
+        <button class="btn" :disabled="settingsBusy" @click="settingsDialogEl?.close()">Close</button>
+      </div>
+    </div>
+  </dialog>
 
   <!-- Card dialog -->
   <dialog ref="cardDialogEl" class="card-dialog" @close="onCardDialogClose">
@@ -2064,6 +2347,7 @@ onBeforeUnmount(() => {
     class="column-menu"
     :style="{ top: boardMenu.top + 'px', right: boardMenu.right + 'px' }"
   >
+    <button @click="openSettings">Settings</button>
     <button @click="openArchiveFromMenu">Archive</button>
   </div>
 

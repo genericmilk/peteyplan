@@ -44,6 +44,9 @@ function boardText(board) {
   return JSON.stringify(board, null, 2);
 }
 
+const boardIdInput = z.string().optional().describe("Board ID (omit for Default Board)");
+const boardPath = (boardId) => `/api/board${boardId ? `?boardId=${encodeURIComponent(boardId)}` : ""}`;
+
 /* ── Server ──────────────────────────────────────────────────────────────── */
 
 const server = new McpServer({
@@ -53,13 +56,17 @@ const server = new McpServer({
 
 // ── Board ────────────────────────────────────────────────────────────────────
 
-server.tool("get_board", "Get the full Kanban board with all columns and cards", {}, async () => {
-  const board = await api("/api/board");
+server.tool("get_boards", "List boards, including their IDs, emoji and colours", {}, async () => {
+  return { content: [{ type: "text", text: boardText(await api("/api/boards")) }] };
+});
+
+server.tool("get_board", "Get the full Kanban board with all columns and cards", { boardId: boardIdInput }, async ({ boardId }) => {
+  const board = await api(boardPath(boardId));
   return { content: [{ type: "text", text: boardText(board) }] };
 });
 
-server.tool("get_columns", "List all columns on the board", {}, async () => {
-  const board = await api("/api/board");
+server.tool("get_columns", "List all columns on the board", { boardId: boardIdInput }, async ({ boardId }) => {
+  const board = await api(boardPath(boardId));
   const cols = board.columns.map((c) => ({ id: c.id, title: c.title, cardCount: c.cards.length }));
   return { content: [{ type: "text", text: JSON.stringify(cols, null, 2) }] };
 });
@@ -67,9 +74,9 @@ server.tool("get_columns", "List all columns on the board", {}, async () => {
 server.tool(
   "get_cards",
   "Get all cards in a specific column",
-  { columnId: z.string().describe("The column ID") },
-  async ({ columnId }) => {
-    const board = await api("/api/board");
+  { columnId: z.string().describe("The column ID"), boardId: boardIdInput },
+  async ({ columnId, boardId }) => {
+    const board = await api(boardPath(boardId));
     const col = board.columns.find((c) => c.id === columnId);
     if (!col) return { content: [{ type: "text", text: `Column not found: ${columnId}` }], isError: true };
     return { content: [{ type: "text", text: boardText(col.cards) }] };
@@ -178,11 +185,12 @@ server.tool(
   "Move a card from one column to another (optionally at a specific position). cardId accepts a card ID or PP-n ref (e.g. PP-12).",
   {
     fromColumnId: z.string().describe("Source column ID"),
+    boardId: boardIdInput,
     toColumnId: z.string().describe("Destination column ID"),
     cardId: z.string().describe("The card ID or PP-n ref to move (e.g. PP-12)"),
   },
-  async ({ fromColumnId, toColumnId, cardId, position }) => {
-    const board = await api("/api/board");
+  async ({ fromColumnId, toColumnId, cardId, position, boardId }) => {
+    const board = await api(boardPath(boardId));
     const fromCol = board.columns.find((c) => c.id === fromColumnId);
     const toCol = board.columns.find((c) => c.id === toColumnId);
     if (!fromCol) return { content: [{ type: "text", text: `Source column not found: ${fromColumnId}` }], isError: true };
@@ -218,9 +226,9 @@ server.tool(
 server.tool(
   "add_column",
   "Add a new column to the board",
-  { title: z.string().describe("Column title") },
-  async ({ title }) => {
-    const col = await api("/api/columns", { method: "POST", body: JSON.stringify({ title }) });
+  { title: z.string().describe("Column title"), boardId: boardIdInput },
+  async ({ title, boardId }) => {
+    const col = await api(`/api/columns${boardId ? `?boardId=${encodeURIComponent(boardId)}` : ""}`, { method: "POST", body: JSON.stringify({ title }) });
     return { content: [{ type: "text", text: boardText(col) }] };
   }
 );
@@ -265,12 +273,13 @@ server.tool(
   "reorder_columns",
   "Reorder columns left-to-right on the board",
   {
+    boardId: boardIdInput,
     orderedIds: z
       .array(z.string())
       .describe("Complete list of column IDs in the desired left-to-right order"),
   },
-  async ({ orderedIds }) => {
-    await api("/api/columns/reorder", {
+  async ({ orderedIds, boardId }) => {
+    await api(`/api/columns/reorder${boardId ? `?boardId=${encodeURIComponent(boardId)}` : ""}`, {
       method: "POST",
       body: JSON.stringify({ orderedIds }),
     });
