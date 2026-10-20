@@ -3,11 +3,15 @@ import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import {
   ARCHIVE_AFTER_DAYS,
-  DEFAULT_KIND,
+  DEFAULT_KINDS,
   DEFAULT_PROGRESS,
+  defaultKind,
   normalizeKind,
+  normalizeKinds,
   normalizeProgress,
   progressForKindChange,
+  useCardKinds,
+  type KindDef,
   type KindId,
   type ProgressId,
 } from './utils/progress'
@@ -223,6 +227,73 @@ export function deleteBoard(id: string): boolean {
     db.prepare('DELETE FROM boards WHERE id = ?').run(id)
   })()
   return true
+}
+
+/* ── Work types ────────────────────────────────────────────────────────────── */
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS work_types (
+    id       TEXT PRIMARY KEY,
+    label    TEXT NOT NULL,
+    stages   TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0
+  );
+`)
+
+function writeWorkTypes(kinds: KindDef[]) {
+  db.prepare('DELETE FROM work_types').run()
+  const insert = db.prepare('INSERT INTO work_types (id, label, stages, position) VALUES (?, ?, ?, ?)')
+  kinds.forEach((kind, i) => insert.run(kind.id, kind.label, JSON.stringify(kind.stages), i))
+}
+
+function readWorkTypes(): KindDef[] {
+  const rows = db.prepare('SELECT id, label, stages FROM work_types ORDER BY position, rowid').all() as
+    { id: string; label: string; stages: string }[]
+  try {
+    return normalizeKinds(rows.map((row) => ({ id: row.id, label: row.label, stages: JSON.parse(row.stages) })))
+  } catch {
+    return DEFAULT_KINDS
+  }
+}
+
+if (!(db.prepare('SELECT COUNT(*) AS n FROM work_types').get() as { n: number }).n) {
+  db.transaction(() => writeWorkTypes(DEFAULT_KINDS))()
+}
+let workTypes = readWorkTypes()
+useCardKinds(() => workTypes)
+
+export function getWorkTypes(): KindDef[] {
+  return workTypes
+}
+
+/**
+ * Replace the work type list. Cards on a removed stage step back to the
+ * nearest earlier stage that still exists; cards of a removed type move to
+ * the first type, keeping their stage when it exists there (else Todo).
+ * Throws on an invalid list.
+ */
+export function saveWorkTypes(input: unknown): KindDef[] {
+  const next = normalizeKinds(input)
+  const nextById = new Map(next.map((kind) => [kind.id, kind]))
+  const move = db.prepare('UPDATE cards SET kind = ?, progress = ? WHERE kind = ? AND progress = ?')
+  db.transaction(() => {
+    for (const old of workTypes) {
+      const kept = nextById.get(old.id)
+      const target = kept ?? next[0]
+      const has = (id: string) => target.stages.some((stage) => stage.id === id)
+      old.stages.forEach((stage, i) => {
+        let progress = stage.id
+        if (kept) {
+          for (let j = i; j >= 0 && !has(progress); j--) progress = old.stages[j].id
+        }
+        if (!has(progress)) progress = DEFAULT_PROGRESS
+        if (target.id !== old.id || progress !== stage.id) move.run(target.id, progress, old.id, stage.id)
+      })
+    }
+    writeWorkTypes(next)
+  })()
+  workTypes = next
+  return workTypes
 }
 
 /* ── Public types ──────────────────────────────────────────────────────────── */
@@ -669,6 +740,33 @@ export function getArchivedCards(boardId = DEFAULT_BOARD_ID): ArchivedCard[] {
   }))
 }
 
+export interface SearchIndex {
+  columns: { id: string; boardId: string; title: string; cardCount: number }[]
+  cards: (Card & { boardId: string; columnTitle: string })[]
+}
+
+/** Every column and card (archived included) across all boards, for the command palette. */
+export function getSearchIndex(): SearchIndex {
+  archiveStaleDoneCards()
+  const columns = db.prepare(
+    `SELECT col.id, col.board_id AS boardId, col.title,
+            (SELECT COUNT(*) FROM cards c WHERE c.column_id = col.id AND c.archived_at IS NULL) AS cardCount
+     FROM columns col
+     JOIN boards b ON b.id = col.board_id
+     ORDER BY b.position, b.rowid, col.position, col.rowid`
+  ).all() as SearchIndex['columns']
+  const rows = db.prepare(
+    `SELECT c.*, col.board_id AS board_id_of_column, col.title AS column_title
+     FROM cards c
+     JOIN columns col ON col.id = c.column_id
+     ORDER BY c.archived_at IS NOT NULL, c.number DESC`
+  ).all() as (CardRow & { board_id_of_column: string; column_title: string })[]
+  return {
+    columns,
+    cards: rows.map((row) => ({ ...toCard(row), boardId: row.board_id_of_column, columnTitle: row.column_title })),
+  }
+}
+
 export function getColumn(id: string): ColumnRow | undefined {
   return db.prepare('SELECT * FROM columns WHERE id = ?').get(id) as ColumnRow | undefined
 }
@@ -733,7 +831,7 @@ export function addCard(
   jiraKey = '',
   dueBy = '',
   progress: ProgressId = DEFAULT_PROGRESS,
-  kind: KindId = DEFAULT_KIND,
+  kind: KindId = defaultKind(),
   /** When true (UI create), card starts viewed so no unread dot. MCP/API leave null. */
   markViewed = false,
   checklist: ChecklistItem[] = []
@@ -944,13 +1042,18 @@ export function reorderCards(columnId: string, orderedIds: string[]): boolean {
   return true
 }
 
+/** Title for the column made when a card is dropped onto a board with no columns. */
+export const UNTITLED_COLUMN_TITLE = 'Untitled column'
+
 export function transferBoardItem(
   fromBoardId: string,
   toBoardId: string,
   type: 'card' | 'column',
   itemId: string,
   targetColumnId?: string,
-  targetPosition?: number
+  targetPosition?: number,
+  /** Card only: put it in a new Untitled column at the end of the board */
+  newColumn = false
 ): boolean | 'missing-target-column' {
   if (!hasBoard(fromBoardId) || !hasBoard(toBoardId)) return false
   const card = type === 'card' ? getCardRow(resolveCardId(itemId)) : undefined
@@ -969,12 +1072,12 @@ export function transferBoardItem(
     })()
     return true
   }
-  let destination = targetColumnId ? getColumn(targetColumnId) : undefined
-  if (targetColumnId && (!destination || destination.board_id !== toBoardId)) return 'missing-target-column'
-  if (!destination && db.prepare('SELECT 1 FROM columns WHERE board_id = ?').get(toBoardId)) return 'missing-target-column'
+  let destination = targetColumnId && !newColumn ? getColumn(targetColumnId) : undefined
+  if (!newColumn && targetColumnId && (!destination || destination.board_id !== toBoardId)) return 'missing-target-column'
+  if (!newColumn && !destination && db.prepare('SELECT 1 FROM columns WHERE board_id = ?').get(toBoardId)) return 'missing-target-column'
   const moved = card!
   db.transaction(() => {
-    if (!destination) destination = getColumn(addColumn('To Do', toBoardId).id)!
+    if (!destination) destination = getColumn(addColumn(UNTITLED_COLUMN_TITLE, toBoardId).id)!
     const target = destination
     const ids = (db.prepare('SELECT id FROM cards WHERE column_id = ? AND archived_at IS NULL AND id != ? ORDER BY position, rowid')
       .all(target.id, moved.id) as { id: string }[]).map((entry) => entry.id)

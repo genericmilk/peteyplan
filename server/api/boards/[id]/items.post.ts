@@ -8,6 +8,7 @@ export default defineEventHandler(async (event) => {
     itemId?: unknown
     targetColumnId?: unknown
     targetPosition?: unknown
+    newColumn?: unknown
   }>(event)
   const fromBoardId = typeof body?.fromBoardId === 'string' ? body.fromBoardId : ''
   const type = body?.type === 'card' || body?.type === 'column' ? body.type : null
@@ -27,7 +28,8 @@ export default defineEventHandler(async (event) => {
     type,
     itemId,
     targetColumnId,
-    typeof targetPosition === 'number' ? targetPosition : undefined
+    typeof targetPosition === 'number' ? targetPosition : undefined,
+    body?.newColumn === true
   )
   if (result === 'missing-target-column') {
     throw createError({ statusCode: 409, statusMessage: 'No valid destination column exists on this board' })

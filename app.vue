@@ -2,18 +2,26 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   PhArchive,
+  PhArrowDown,
   PhArrowLeft,
   PhArrowRight,
+  PhArrowUp,
+  PhCards,
   PhCaretDown,
+  PhCheck,
+  PhColumns,
   PhDotsSixVertical,
   PhDotsThreeVertical,
+  PhFunnel,
   PhGear,
+  PhLink,
   PhListChecks,
   PhMagnifyingGlass,
   PhMoon,
   PhPencilSimple,
   PhPlus,
   PhRocketLaunch,
+  PhSliders,
   PhSquaresFour,
   PhSun,
   PhTrash,
@@ -21,15 +29,25 @@ import {
 } from '@phosphor-icons/vue'
 import {
   ARCHIVE_AFTER_DAYS,
-  CARD_KINDS,
-  DEFAULT_KIND,
   DEFAULT_PROGRESS,
+  FIRST_STAGE,
+  KIND_LABEL_MAX_LENGTH,
+  KINDS_MAX,
+  LAST_STAGE,
+  STAGE_LABEL_MAX_LENGTH,
+  STAGES_MAX,
+  cardKinds,
+  defaultKind,
+  isKindId,
+  isProgressForKind,
   kindDef,
   normalizeKind,
   normalizeProgress,
   progressForKindChange,
   progressIndex,
   stagesForKind,
+  useCardKinds,
+  type KindDef,
   type KindId,
   type ProgressId,
 } from '~/shared/progress'
@@ -41,6 +59,14 @@ import {
   type ChecklistItem,
 } from '~/shared/checklist'
 import { accentPalette } from '~/shared/accent'
+import type { PaletteItem } from '~/components/CommandPalette.vue'
+import {
+  SHARE_HASH_KEY,
+  decodeSharedCard,
+  encodeSharedCard,
+  shareTokenFrom,
+  type SharedCard,
+} from '~/shared/share'
 import {
   DENSITY_OPTIONS,
   MOTION_OPTIONS,
@@ -384,6 +410,11 @@ const error = ref<string | null>(null)
 const searchQuery = ref('')
 const releasesOpen = ref(false)
 const releaseDropTarget = ref<string | null>(null)
+// Seeded from the server's list during SSR and sent in the payload, so the
+// first client render matches the server even when types are customised.
+const workTypes = useState<KindDef[]>('work-types', () => cardKinds())
+// Client only: during SSR the server's own registry must stay in charge.
+if (import.meta.client) useCardKinds(() => workTypes.value)
 
 const isSearching = computed(() => searchQuery.value.trim().length > 0)
 
@@ -456,7 +487,12 @@ async function loadBoard() {
     const saved = localStorage.getItem('peteyplan-board')
     activeBoardId.value = boards.value.find((entry) => entry.id === saved)?.id
       ?? boards.value.find((entry) => entry.isDefault)!.id
-    board.value = normalizeBoard(await api<Board>('/api/board'))
+    const [kinds, loaded] = await Promise.all([
+      api<{ kinds: KindDef[] }>('/api/kinds'),
+      api<Board>('/api/board'),
+    ])
+    workTypes.value = kinds.kinds
+    board.value = normalizeBoard(loaded)
     error.value = null
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to load board'
@@ -798,11 +834,11 @@ async function saveCard(
   jiraKey: string,
   dueBy: string,
   progress: ProgressId = DEFAULT_PROGRESS,
-  kind: KindId = DEFAULT_KIND,
+  kind: KindId = defaultKind(),
   checklist: ChecklistItem[] = []
-) {
+): Promise<string | null> {
   const trimmed = title.trim()
-  if (!trimmed || !findColumn(columnId)) return
+  if (!trimmed || !findColumn(columnId)) return null
   const normalizedKind = normalizeKind(kind)
   const payload = {
     title: trimmed,
@@ -814,6 +850,7 @@ async function saveCard(
     checklist: normalizeChecklist(checklist),
   }
   try {
+    let savedId = cardId
     if (cardId) {
       await api(`/api/cards/${cardId}`, {
         method: 'PATCH',
@@ -821,13 +858,17 @@ async function saveCard(
       })
     } else {
       // Created from the dialog — already viewed by the user.
-      await api('/api/cards', {
+      savedId = (await api<{ id: string }>('/api/cards', {
         method: 'POST',
         body: JSON.stringify({ columnId, ...payload, markViewed: true }),
-      })
+      })).id
     }
     await refreshBoard()
-  } catch (err) { fail(err) }
+    return savedId
+  } catch (err) {
+    fail(err)
+    return null
+  }
 }
 
 async function setCardProgress(cardId: string, progress: ProgressId) {
@@ -1108,6 +1149,8 @@ const dropIndicator = ref<{ columnId: string; index: number } | null>(null)
 
 const draggedColumnId = ref<string | null>(null)
 const columnDropIndex = ref<number | null>(null)
+/** A card is hovering the empty space after the last column: dropping makes a new column. */
+const newColumnDrop = ref(false)
 const pillHoverId = ref<string | null>(null)
 let pillHoverTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -1137,21 +1180,32 @@ function finishDrag() {
   draggedColumnId.value = null
   dropIndicator.value = null
   columnDropIndex.value = null
+  newColumnDrop.value = false
   releaseDropTarget.value = null
   dragSourceBoardId.value = null
   dragSourceColumn.value = null
 }
 
-async function transferDraggedItem(type: 'card' | 'column', itemId: string, targetColumnId?: string, targetPosition?: number) {
+async function transferDraggedItem(
+  type: 'card' | 'column',
+  itemId: string,
+  targetColumnId?: string,
+  targetPosition?: number,
+  newColumn = false
+) {
   const fromBoardId = dragSourceBoardId.value
   const toBoardId = activeBoardId.value
+  // A card dropped on a board with no columns, or past the last column, lands in a new "Untitled column".
+  const createsColumn = type === 'card' && (newColumn || (!targetColumnId && board.value.columns.length === 0))
   finishDrag()
   try {
     await api(`/api/boards/${toBoardId}/items`, {
       method: 'POST',
-      body: JSON.stringify({ fromBoardId, type, itemId, targetColumnId, targetPosition }),
+      body: JSON.stringify({ fromBoardId, type, itemId, targetColumnId, targetPosition, newColumn }),
     })
     await refreshBoard()
+    const created = createsColumn && activeBoardId.value === toBoardId ? board.value.columns.at(-1) : undefined
+    if (created) openColumnDialog(created.id, 'Name the new column')
   } catch (err) { fail(err) }
 }
 
@@ -1322,10 +1376,26 @@ function onColumnDrop(event: DragEvent, column: Column) {
   finishDrag()
 }
 
+/** True when the pointer is to the right of the last real column. */
+function isPastLastColumn(boardEl: HTMLElement, clientX: number): boolean {
+  const cols = boardEl.querySelectorAll<HTMLElement>('.column:not(.column-placeholder):not(.drag-source-parked)')
+  const last = cols[cols.length - 1]
+  return !!last && clientX > last.getBoundingClientRect().right
+}
+
 function onBoardDragOver(event: DragEvent) {
   if (foreignDrag.value && dragged.value && board.value.columns.length === 0) {
     event.preventDefault()
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    return
+  }
+  if (dragged.value && !draggedColumnId.value) {
+    const past = !isSearching.value && isPastLastColumn(event.currentTarget as HTMLElement, event.clientX)
+    newColumnDrop.value = past
+    if (!past) return
+    event.preventDefault()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    dropIndicator.value = null
     return
   }
   if (!draggedColumnId.value) return
@@ -1352,6 +1422,7 @@ function onBoardDragLeave(event: DragEvent) {
   const boardEl = event.currentTarget as HTMLElement
   if (!boardEl.contains(event.relatedTarget as Node | null)) {
     columnDropIndex.value = null
+    newColumnDrop.value = false
   }
 }
 
@@ -1359,6 +1430,10 @@ function onBoardDrop(event: DragEvent) {
   event.preventDefault()
   if (foreignDrag.value && dragged.value && board.value.columns.length === 0) {
     transferDraggedItem('card', dragged.value.cardId)
+    return
+  }
+  if (dragged.value && newColumnDrop.value) {
+    transferDraggedItem('card', dragged.value.cardId, undefined, undefined, true)
     return
   }
   const columnId = draggedColumnId.value
@@ -1439,12 +1514,16 @@ const cardTitle = ref('')
 const cardDesc = ref('')
 const cardJiraKey = ref('')
 const cardDueBy = ref('')
-const cardKindId = ref<KindId>(DEFAULT_KIND)
+const cardKindId = ref<KindId>(defaultKind())
 const cardProgressStage = ref<ProgressId>(DEFAULT_PROGRESS)
 const cardDeleteVisible = ref(false)
 const cardDialogColumnId = ref<string | null>(null)
 const cardDialogCardId = ref<string | null>(null)
 const cardDialogRef = ref('')
+/** Where Save puts the card; '' column means a new Untitled column on that board. */
+const cardMoveBoardId = ref('')
+const cardMoveColumnId = ref('')
+const cardMoveColumns = ref<{ id: string; title: string }[]>([])
 const descEditing = ref(false)
 const cardChecklist = ref<ChecklistItem[]>([])
 const checklistDraft = ref('')
@@ -1562,6 +1641,9 @@ async function markCardViewed(card: Card) {
 function openCardDialog(columnId: string, cardId: string | null) {
   cardDialogColumnId.value = columnId
   cardDialogCardId.value = cardId
+  cardMoveBoardId.value = activeBoardId.value
+  cardMoveColumnId.value = columnId
+  cardMoveColumns.value = board.value.columns.map(({ id, title }) => ({ id, title }))
   if (cardId) {
     const card = findColumn(columnId)?.cards.find((c) => c.id === cardId)
     if (!card) return
@@ -1585,7 +1667,7 @@ function openCardDialog(columnId: string, cardId: string | null) {
     cardJiraKey.value = ''
     cardDueBy.value = ''
     cardChecklist.value = []
-    cardKindId.value = DEFAULT_KIND
+    cardKindId.value = defaultKind()
     cardProgressStage.value = DEFAULT_PROGRESS
     cardDeleteVisible.value = false
     descEditing.value = true
@@ -1608,13 +1690,45 @@ function onCardDialogClose() {
   cardDueBy.value = ''
   cardChecklist.value = []
   checklistDraft.value = ''
-  cardKindId.value = DEFAULT_KIND
+  cardKindId.value = defaultKind()
   cardProgressStage.value = DEFAULT_PROGRESS
   descEditing.value = false
 }
 
+async function onCardMoveBoardChange() {
+  const boardId = cardMoveBoardId.value
+  const columns = await fetchBoardColumns(boardId)
+  if (boardId !== cardMoveBoardId.value) return
+  cardMoveColumns.value = columns
+  if (boardId === activeBoardId.value) cardMoveColumnId.value = cardDialogColumnId.value ?? ''
+  else cardMoveColumnId.value = columns[0]?.id ?? ''
+}
+
+/** Move a saved card to the board and column picked in the dialog, if they changed. */
+async function moveCardFromDialog(cardId: string) {
+  const toBoardId = cardMoveBoardId.value
+  const targetColumnId = cardMoveColumnId.value
+  const newColumn = !targetColumnId
+  if (toBoardId === activeBoardId.value && targetColumnId === cardDialogColumnId.value) return
+  try {
+    await api(`/api/boards/${toBoardId}/items`, {
+      method: 'POST',
+      body: JSON.stringify({ fromBoardId: activeBoardId.value, type: 'card', itemId: cardId, targetColumnId: targetColumnId || undefined, newColumn }),
+    })
+    if (!newColumn) {
+      await refreshBoard()
+      return
+    }
+    // Follow the card so its new Untitled column can be named straight away.
+    if (toBoardId === activeBoardId.value) await refreshBoard()
+    else await switchBoard(toBoardId)
+    const created = activeBoardId.value === toBoardId ? board.value.columns.at(-1) : undefined
+    if (created) openColumnDialog(created.id, 'Name the new column')
+  } catch (err) { fail(err) }
+}
+
 async function saveCardFromDialog() {
-  await saveCard(
+  const savedId = await saveCard(
     cardDialogColumnId.value!,
     cardDialogCardId.value,
     cardTitle.value,
@@ -1626,6 +1740,7 @@ async function saveCardFromDialog() {
     cardChecklistWithDraft()
   )
   closeCardDialog()
+  if (savedId) await moveCardFromDialog(savedId)
 }
 
 async function deleteCardFromDialog() {
@@ -1633,6 +1748,163 @@ async function deleteCardFromDialog() {
     await deleteCard(cardDialogCardId.value)
   }
   closeCardDialog()
+}
+
+/* ── Share links ───────────────────────────────────────────────────────────── */
+
+const shareLinkCopied = ref(false)
+let shareLinkCopiedTimer: ReturnType<typeof setTimeout> | undefined
+
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    // Clipboard API needs a secure context; plain-http LAN installs fall back.
+    const area = document.createElement('textarea')
+    area.value = text
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    ;(cardDialogEl.value ?? document.body).appendChild(area)
+    area.select()
+    document.execCommand('copy')
+    area.remove()
+  }
+}
+
+/** Copy a link carrying the card as shown in the dialog, unsaved edits included. */
+async function copyCardShareLink() {
+  const kind = normalizeKind(cardKindId.value)
+  const progress = normalizeProgress(cardProgressStage.value, kind)
+  const token = await encodeSharedCard({
+    title: cardTitle.value.trim() || 'Untitled card',
+    description: cardDesc.value.trim(),
+    jiraKey: normalizeJiraKey(cardJiraKey.value),
+    dueBy: cardDueBy.value.trim(),
+    kind,
+    kindLabel: kindDef(kind).label,
+    progress,
+    progressLabel: stagesForKind(kind).find((stage) => stage.id === progress)?.label ?? '',
+    checklist: cardChecklistWithDraft().map(({ text, done }) => ({ text, done })),
+    ref: cardDialogRef.value,
+  })
+  try {
+    await copyText(`${location.origin}/#${SHARE_HASH_KEY}=${token}`)
+  } catch (err) {
+    fail(err)
+    return
+  }
+  shareLinkCopied.value = true
+  clearTimeout(shareLinkCopiedTimer)
+  clearTimeout(flashColumnTimer)
+  shareLinkCopiedTimer = setTimeout(() => { shareLinkCopied.value = false }, 1800)
+}
+
+const shareDialogEl = ref<HTMLDialogElement | null>(null)
+const sharedCard = ref<SharedCard | null>(null)
+const shareBoardId = ref('')
+const shareColumns = ref<{ id: string; title: string }[]>([])
+const shareColumnId = ref('')
+const shareBusy = ref(false)
+const sharedCardSummary = computed(() => {
+  const card = sharedCard.value
+  if (!card) return ''
+  const kind = kindDef(sharedCardKind(card))
+  const progress = sharedCardProgress(card, kind.id)
+  const parts: string[] = [kind.label, kind.stages.find((stage) => stage.id === progress)?.label ?? '']
+  const jira = normalizeJiraKey(card.jiraKey)
+  if (jira) parts.push(jira)
+  if (card.dueBy) parts.push(`Due ${formatDueBy(card.dueBy)}`)
+  if (card.checklist.length) parts.push(`${card.checklist.filter((item) => item.done).length}/${card.checklist.length} checklist`)
+  return parts.filter(Boolean).join(' · ')
+})
+
+function clearShareHash() {
+  if (shareTokenFrom(location.hash)) history.replaceState(null, '', location.pathname + location.search)
+}
+
+async function openShareFromHash() {
+  const token = shareTokenFrom(location.hash)
+  if (!token) return
+  const card = await decodeSharedCard(token)
+  if (!card) {
+    clearShareHash()
+    error.value = 'That share link is broken or incomplete. Ask for it to be copied again.'
+    return
+  }
+  sharedCard.value = card
+  shareBoardId.value = activeBoardId.value
+  await loadShareColumns()
+  nextTick(() => shareDialogEl.value?.showModal())
+}
+
+/** Column ids and titles for any board; the active board is read locally. */
+async function fetchBoardColumns(boardId: string): Promise<{ id: string; title: string }[]> {
+  let columns: Column[] = board.value.columns
+  if (boardId !== activeBoardId.value) {
+    try {
+      const res = await fetch(`/api/board?boardId=${encodeURIComponent(boardId)}`)
+      columns = res.ok ? ((await res.json()) as Board).columns ?? [] : []
+    } catch { columns = [] }
+  }
+  return columns.map(({ id, title }) => ({ id, title }))
+}
+
+async function loadShareColumns() {
+  const boardId = shareBoardId.value
+  const columns = await fetchBoardColumns(boardId)
+  if (boardId !== shareBoardId.value) return
+  shareColumns.value = columns
+  if (!shareColumns.value.some((col) => col.id === shareColumnId.value)) {
+    shareColumnId.value = shareColumns.value[0]?.id ?? ''
+  }
+}
+
+function closeShareDialog() {
+  shareDialogEl.value?.close()
+}
+
+function onShareDialogClose() {
+  sharedCard.value = null
+  shareBusy.value = false
+  clearShareHash()
+}
+
+/** Match the sender's work type by id, then by name; unknown types fall back to the default. */
+function sharedCardKind(card: SharedCard): KindId {
+  return isKindId(card.kind) ? card.kind : normalizeKind(card.kindLabel || card.kind)
+}
+
+function sharedCardProgress(card: SharedCard, kind: KindId): ProgressId {
+  return isProgressForKind(card.progress, kind) ? card.progress : normalizeProgress(card.progressLabel || card.progress, kind)
+}
+
+async function addSharedCard() {
+  const card = sharedCard.value
+  if (!card || !shareColumnId.value || shareBusy.value) return
+  shareBusy.value = true
+  const kind = sharedCardKind(card)
+  try {
+    await api('/api/cards', {
+      method: 'POST',
+      body: JSON.stringify({
+        columnId: shareColumnId.value,
+        title: card.title,
+        description: card.description,
+        jiraKey: normalizeJiraKey(card.jiraKey),
+        dueBy: card.dueBy,
+        kind,
+        progress: sharedCardProgress(card, kind),
+        checklist: card.checklist,
+      }),
+    })
+    const targetBoardId = shareBoardId.value
+    closeShareDialog()
+    if (targetBoardId === activeBoardId.value) await refreshBoard()
+    else await switchBoard(targetBoardId)
+  } catch (err) {
+    fail(err)
+    shareBusy.value = false
+  }
 }
 
 /* ── Release dialog ────────────────────────────────────────────────────────── */
@@ -1703,11 +1975,11 @@ const columnTitle = ref('')
 const columnMode = ref<'add' | 'rename'>('add')
 const columnDialogColumnId = ref<string | null>(null)
 
-function openColumnDialog(columnId: string | null) {
+function openColumnDialog(columnId: string | null, heading?: string) {
   const col = columnId ? findColumn(columnId) : null
   columnMode.value = col ? 'rename' : 'add'
   columnDialogColumnId.value = col?.id ?? null
-  columnDialogTitle.value = col ? 'Rename column' : 'New column'
+  columnDialogTitle.value = heading ?? (col ? 'Rename column' : 'New column')
   columnTitle.value = col?.title ?? ''
   nextTick(() => {
     columnDialogEl.value?.showModal()
@@ -1813,13 +2085,88 @@ const settingsDialogEl = ref<HTMLDialogElement | null>(null)
 const boardDrafts = ref<BoardInfo[]>([])
 const newBoard = ref({ name: '', emoji: '📋', color: '#5b8cff' })
 const settingsBusy = ref(false)
-const settingsTab = ref<'appearance' | 'boards'>('appearance')
+const settingsTab = ref<'appearance' | 'boards' | 'types'>('appearance')
 
-function openSettings(tab: 'appearance' | 'boards' = 'appearance') {
+function openSettings(tab: 'appearance' | 'boards' | 'types' = 'appearance') {
   closeBoardMenu()
   settingsTab.value = tab
   boardDrafts.value = boards.value.map((entry) => ({ ...entry }))
+  resetKindDrafts()
   settingsDialogEl.value?.showModal()
+}
+
+/** Editable copy of the work types; `stages` holds only those between Todo and Done. */
+interface KindDraft { key: number; id: string; label: string; stages: { key: number; id: string; label: string }[] }
+const kindDrafts = ref<KindDraft[]>([])
+let kindDraftKey = 0
+
+function kindDraftsFrom(kinds: KindDef[]): KindDraft[] {
+  return kinds.map((kind) => ({
+    key: ++kindDraftKey,
+    id: kind.id,
+    label: kind.label,
+    stages: kind.stages.slice(1, -1).map((stage) => ({ key: ++kindDraftKey, ...stage })),
+  }))
+}
+
+function kindDraftsPayload(drafts: KindDraft[]) {
+  return drafts.map((kind) => ({
+    id: kind.id,
+    label: kind.label.trim(),
+    stages: kind.stages.filter((stage) => stage.label.trim()).map((stage) => ({ id: stage.id, label: stage.label.trim() })),
+  }))
+}
+
+function resetKindDrafts() {
+  kindDrafts.value = kindDraftsFrom(workTypes.value)
+}
+
+const kindDraftsDirty = computed(() =>
+  JSON.stringify(kindDraftsPayload(kindDrafts.value)) !== JSON.stringify(kindDraftsPayload(kindDraftsFrom(workTypes.value)))
+)
+
+function moveInList<T>(list: T[], index: number, direction: -1 | 1) {
+  const target = index + direction
+  if (target < 0 || target >= list.length) return
+  ;[list[index], list[target]] = [list[target], list[index]]
+}
+
+function addKindDraft() {
+  kindDrafts.value.push({ key: ++kindDraftKey, id: '', label: '', stages: [{ key: ++kindDraftKey, id: '', label: 'Doing' }] })
+  nextTick(() => {
+    const inputs = document.querySelectorAll<HTMLInputElement>('.work-type-name input')
+    inputs[inputs.length - 1]?.focus()
+  })
+}
+
+function removeKindDraft(index: number) {
+  const kind = kindDrafts.value[index]
+  const fallback = kindDrafts.value.find((_, i) => i !== index)
+  if (!fallback) return
+  const name = kind.label.trim() || 'this work type'
+  if (kind.id && !window.confirm(`Remove "${name}"? Its cards become "${fallback.label.trim() || 'the first type'}" when you save.`)) return
+  kindDrafts.value.splice(index, 1)
+}
+
+function addStageDraft(kind: KindDraft) {
+  kind.stages.push({ key: ++kindDraftKey, id: '', label: '' })
+  nextTick(() => document.querySelector<HTMLInputElement>(`[data-stage-key="${kind.stages[kind.stages.length - 1].key}"]`)?.focus())
+}
+
+async function saveKindDrafts() {
+  settingsBusy.value = true
+  try {
+    const saved = await api<{ kinds: KindDef[] }>('/api/kinds', {
+      method: 'PUT',
+      body: JSON.stringify({ kinds: kindDraftsPayload(kindDrafts.value) }),
+    })
+    workTypes.value = saved.kinds
+    resetKindDrafts()
+    error.value = null
+    // Cards on removed types or stages were moved server-side.
+    await refreshBoard()
+  } catch (err) { fail(err) }
+  finally { settingsBusy.value = false }
 }
 
 async function saveBoardSettings(draft: { name: string; emoji: string; color: string }, id?: string) {
@@ -1936,16 +2283,149 @@ function onDocumentMousedown(event: MouseEvent) {
 }
 
 const boardEl = ref<HTMLElement | null>(null)
-const searchInputEl = ref<HTMLInputElement | null>(null)
 
-/** "/" jumps to the filter box; Escape in it clears the filter. */
+/* ── Command palette ───────────────────────────────────────────────────────── */
+
+interface SearchIndex {
+  columns: { id: string; boardId: string; title: string; cardCount: number }[]
+  cards: (Card & { boardId: string; columnTitle: string; archivedAt: string | null })[]
+}
+
+const paletteOpen = ref(false)
+const paletteQuery = ref('')
+const paletteLoading = ref(false)
+const searchIndex = ref<SearchIndex>({ columns: [], cards: [] })
+const paletteShortcut = ref('Ctrl K')
+const flashColumnId = ref<string | null>(null)
+let flashColumnTimer: ReturnType<typeof setTimeout> | undefined
+
+async function openPalette() {
+  closeBoardMenu()
+  closeColumnMenu()
+  paletteQuery.value = ''
+  paletteOpen.value = true
+  paletteLoading.value = true
+  try {
+    searchIndex.value = await api<SearchIndex>('/api/search')
+  } catch (err) { fail(err) }
+  finally { paletteLoading.value = false }
+}
+
+async function goToBoard(boardId: string) {
+  if (boardId !== activeBoardId.value) await switchBoard(boardId)
+  return activeBoardId.value === boardId
+}
+
+async function goToCard(card: SearchIndex['cards'][number]) {
+  if (!(await goToBoard(card.boardId))) return
+  if (card.archivedAt) await openArchiveFromMenu()
+  else openCardDialog(card.columnId!, card.id)
+}
+
+async function goToColumn(column: SearchIndex['columns'][number]) {
+  if (!(await goToBoard(column.boardId))) return
+  searchQuery.value = ''
+  await nextTick()
+  boardEl.value?.querySelector(`.column[data-id="${CSS.escape(column.id)}"]`)
+    ?.scrollIntoView({ behavior: motionFactor.value ? 'smooth' : 'auto', inline: 'center', block: 'nearest' })
+  flashColumnId.value = column.id
+  clearTimeout(flashColumnTimer)
+  flashColumnTimer = setTimeout(() => { flashColumnId.value = null }, 1400)
+}
+
+const paletteItems = computed<PaletteItem[]>(() => {
+  const boardById = new Map(boards.value.map((entry) => [entry.id, entry]))
+  const firstColumn = board.value.columns[0]
+  const query = paletteQuery.value.trim()
+  const items: PaletteItem[] = []
+  const action = (item: Omit<PaletteItem, 'group'>) => items.push({ group: 'Actions', ...item })
+
+  if (firstColumn) {
+    action({ id: 'new-card', title: 'New card', subtitle: `In ${firstColumn.title}`, icon: PhPlus, keywords: 'add create task', run: () => openCardDialog(firstColumn.id, null) })
+    for (const col of board.value.columns.slice(1)) {
+      action({ id: `new-card-${col.id}`, title: `New card in ${col.title}`, icon: PhPlus, keywords: 'add create task', queryOnly: true, run: () => openCardDialog(col.id, null) })
+    }
+  }
+  action({ id: 'new-column', title: 'New column', icon: PhColumns, keywords: 'add create list', run: () => openColumnDialog(null) })
+  action({ id: 'new-board', title: 'New board', icon: PhSquaresFour, keywords: 'add create', run: () => openSettings('boards') })
+  action({ id: 'releases', title: releasesOpen.value ? 'Hide releases' : 'Show releases', icon: PhRocketLaunch, keywords: 'release folders deploy', run: toggleReleasesPanel })
+  action({ id: 'archive', title: 'Open archive', icon: PhArchive, keywords: 'archived restore done old', run: openArchiveFromMenu })
+  action({ id: 'theme', title: resolvedTheme.value === 'dark' ? 'Switch to day mode' : 'Switch to night mode', icon: resolvedTheme.value === 'dark' ? PhSun : PhMoon, keywords: 'theme light dark day night appearance', run: toggleTheme })
+  action({ id: 'settings', title: 'Settings', icon: PhGear, keywords: 'appearance theme density motion surfaces preferences', run: () => openSettings('appearance') })
+  action({ id: 'work-types', title: 'Edit work types', icon: PhSliders, keywords: 'kinds stages progress settings', run: () => openSettings('types') })
+  action({ id: 'boards', title: 'Manage boards', icon: PhSquaresFour, keywords: 'rename delete colour color emoji settings', run: () => openSettings('boards') })
+  if (isSearching.value) {
+    action({ id: 'clear-filter', title: 'Clear filter', subtitle: `Showing cards matching “${searchQuery.value.trim()}”`, icon: PhX, keywords: 'search reset', run: () => { searchQuery.value = '' } })
+  }
+  if (query) {
+    action({ id: 'filter', title: 'Filter this board', subtitle: `Only show cards matching “${query}”`, icon: PhFunnel, anyQuery: true, run: () => { searchQuery.value = query } })
+  }
+
+  for (const entry of boards.value) {
+    items.push({
+      id: `board-${entry.id}`,
+      group: 'Boards',
+      title: entry.name,
+      subtitle: entry.id === activeBoardId.value ? 'Current board' : undefined,
+      emoji: entry.emoji,
+      keywords: 'board switch go',
+      run: () => switchBoard(entry.id),
+    })
+  }
+
+  for (const col of searchIndex.value.columns) {
+    const owner = boardById.get(col.boardId)
+    items.push({
+      id: `column-${col.id}`,
+      group: 'Columns',
+      title: col.title,
+      subtitle: `${owner?.emoji ?? ''} ${owner?.name ?? ''} · ${col.cardCount} ${col.cardCount === 1 ? 'card' : 'cards'}`.trim(),
+      icon: PhColumns,
+      keywords: `${owner?.name ?? ''} column`,
+      queryOnly: true,
+      run: () => goToColumn(col),
+    })
+  }
+
+  for (const card of searchIndex.value.cards) {
+    const owner = boardById.get(card.boardId)
+    const kind = normalizeKind(card.kind)
+    const stage = stagesForKind(kind).find((entry) => entry.id === normalizeProgress(card.progress, kind))?.label ?? ''
+    items.push({
+      id: `card-${card.id}`,
+      group: 'Cards',
+      title: card.title,
+      subtitle: [`${owner?.emoji ?? ''} ${owner?.name ?? ''}`.trim(), card.columnTitle, stage, card.archivedAt ? 'Archived' : '']
+        .filter(Boolean).join(' · '),
+      hint: card.ref,
+      icon: card.archivedAt ? PhArchive : PhCards,
+      muted: !!card.archivedAt,
+      keywords: [
+        card.ref, card.jiraKey, card.description, card.columnTitle, owner?.name, kindDef(kind).label, stage,
+        ...(card.checklist ?? []).map((item) => item.text), card.archivedAt ? 'archived' : '',
+      ].filter(Boolean).join(' '),
+      queryOnly: true,
+      run: () => goToCard(card),
+    })
+  }
+  return items
+})
+
+/** Cmd/Ctrl+K toggles the command palette anywhere; "/" opens it when not typing. */
 function onDocumentKeydown(event: KeyboardEvent) {
+  const openDialog = document.querySelector('dialog[open]')
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k') {
+    if (openDialog && !openDialog.classList.contains('command-palette')) return
+    event.preventDefault()
+    if (paletteOpen.value) paletteOpen.value = false
+    else void openPalette()
+    return
+  }
   if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return
   const target = event.target as HTMLElement | null
-  if (target?.closest('input, textarea, select, [contenteditable="true"]') || document.querySelector('dialog[open]')) return
+  if (target?.closest('input, textarea, select, [contenteditable="true"]') || openDialog) return
   event.preventDefault()
-  searchInputEl.value?.focus()
-  searchInputEl.value?.select()
+  void openPalette()
 }
 
 /** After scrolling a column, keep horizontal pan locked briefly so overscroll doesn't jump sideways. */
@@ -2026,6 +2506,7 @@ watch(boardEl, (el, prev) => {
 
 onMounted(() => {
   initPreferences()
+  if (/Mac|iPhone|iPad/.test(navigator.platform)) paletteShortcut.value = '⌘K'
   fetch('/favicon-light.svg')
     .then((res) => (res.ok ? res.text() : null))
     .then((svg) => { faviconTemplate.value = svg })
@@ -2036,7 +2517,8 @@ onMounted(() => {
   } catch { /* storage unavailable */ }
   document.addEventListener('mousedown', onDocumentMousedown)
   document.addEventListener('keydown', onDocumentKeydown)
-  loadBoard()
+  window.addEventListener('hashchange', openShareFromHash)
+  loadBoard().then(openShareFromHash)
 })
 
 onBeforeUnmount(() => {
@@ -2045,6 +2527,8 @@ onBeforeUnmount(() => {
   cancelPillHover()
   document.removeEventListener('mousedown', onDocumentMousedown)
   document.removeEventListener('keydown', onDocumentKeydown)
+  window.removeEventListener('hashchange', openShareFromHash)
+  clearTimeout(shareLinkCopiedTimer)
   document.removeEventListener('dragover', onDocumentDragOver)
   stopEdgeScroll()
   boardEl.value?.removeEventListener('wheel', onBoardWheel)
@@ -2082,21 +2566,16 @@ onBeforeUnmount(() => {
       <span class="sr-only" aria-live="polite">{{ activeBoard?.name }}</span>
     </div>
     <div class="topbar-actions">
-      <label class="topbar-search">
-        <span class="sr-only">Filter tasks</span>
-        <PhMagnifyingGlass class="search-icon" :size="15" aria-hidden="true" />
-        <input
-          ref="searchInputEl"
-          v-model="searchQuery"
-          class="search-input"
-          type="search"
-          placeholder="Filter tasks…"
-          autocomplete="off"
-          spellcheck="false"
-          @keydown.esc="searchQuery = ''"
-        />
-        <kbd v-if="!searchQuery" class="search-kbd" aria-hidden="true">/</kbd>
-      </label>
+      <span v-if="isSearching" class="filter-chip">
+        <PhFunnel :size="13" aria-hidden="true" />
+        <span class="filter-chip-text">{{ searchQuery.trim() }}</span>
+        <button type="button" :aria-label="'Clear filter ' + searchQuery.trim()" title="Clear filter" @click="searchQuery = ''"><PhX :size="12" weight="bold" /></button>
+      </span>
+      <button type="button" class="topbar-search palette-trigger" :aria-keyshortcuts="paletteShortcut === '⌘K' ? 'Meta+K' : 'Control+K'" @click="openPalette">
+        <PhMagnifyingGlass :size="15" aria-hidden="true" />
+        <span class="palette-trigger-text">Search or jump to…</span>
+        <kbd aria-hidden="true">{{ paletteShortcut }}</kbd>
+      </button>
       <button
         class="btn"
         :class="{ 'btn-active': releasesOpen }"
@@ -2263,7 +2742,7 @@ onBeforeUnmount(() => {
       <div v-if="!col.parked && isColumnDropIndicator(colIndex)" class="column column-placeholder" aria-hidden="true"></div>
       <section
         class="column"
-        :class="{ dragging: draggedColumnId === col.id, 'drag-source-parked': col.parked, 'is-done-column': isDoneColumn(col) }"
+        :class="{ flash: flashColumnId === col.id, dragging: draggedColumnId === col.id, 'drag-source-parked': col.parked, 'is-done-column': isDoneColumn(col) }"
         :aria-hidden="col.parked || undefined"
         :data-id="col.id"
       >
@@ -2443,7 +2922,7 @@ onBeforeUnmount(() => {
                     @change="onCardKindChange(card.id, $event)"
                   >
                     <option
-                      v-for="kind in CARD_KINDS"
+                      v-for="kind in cardKinds()"
                       :key="kind.id"
                       :value="kind.id"
                     >{{ kind.label }}</option>
@@ -2495,10 +2974,14 @@ onBeforeUnmount(() => {
       class="column column-placeholder"
       aria-hidden="true"
     ></div>
+    <div v-if="newColumnDrop" class="column new-column-ghost" aria-hidden="true">
+      <span class="column-title">Untitled column</span>
+      <span class="new-column-ghost-hint"><PhPlus :size="14" weight="bold" />Drop to create a column</span>
+    </div>
     <div v-if="board.columns.length === 0" class="board-empty">
       <div class="board-empty-emoji" aria-hidden="true">{{ activeBoard?.emoji }}</div>
       <h2>{{ activeBoard?.name }}</h2>
-      <p>{{ foreignDrag && dragged ? 'Drop your card here to create a To Do column.' : 'Nothing here yet. Add a column, or drag one in from another board.' }}</p>
+      <p>{{ foreignDrag && dragged ? 'Drop your card here to create a new column.' : 'Nothing here yet. Add a column, or drag one in from another board.' }}</p>
       <button class="btn btn-primary" @click="openColumnDialog(null)"><PhPlus :size="15" weight="bold" aria-hidden="true" />Add column</button>
     </div>
   </main>
@@ -2526,6 +3009,15 @@ onBeforeUnmount(() => {
           aria-controls="settings-panel-boards"
           @click="settingsTab = 'boards'"
         >Boards</button>
+        <button
+          id="settings-tab-types"
+          type="button"
+          role="tab"
+          class="settings-tab"
+          :aria-selected="settingsTab === 'types'"
+          aria-controls="settings-panel-types"
+          @click="settingsTab = 'types'"
+        >Work types</button>
       </div>
       <p v-if="error" class="settings-error" role="alert">{{ error }}</p>
 
@@ -2603,7 +3095,7 @@ onBeforeUnmount(() => {
             >{{ option.label }}</button>
           </div>
         </div>
-        <p class="settings-hint">Appearance is saved in this browser. Press <kbd>/</kbd> anywhere to filter tasks.</p>
+        <p class="settings-hint">Appearance is saved in this browser. Press <kbd>{{ paletteShortcut }}</kbd> anywhere to search cards, boards and actions.</p>
       </section>
 
       <section
@@ -2634,12 +3126,68 @@ onBeforeUnmount(() => {
           <button class="btn btn-primary" :disabled="settingsBusy" type="submit">Create board</button>
         </form>
       </section>
+
+      <section
+        v-show="settingsTab === 'types'"
+        id="settings-panel-types"
+        role="tabpanel"
+        aria-labelledby="settings-tab-types"
+        class="settings-panel"
+      >
+        <p class="settings-hint">
+          Each work type has its own progress stages. Every type starts at Todo and ends at Done, which is what marks a card complete.
+          The first type is used for new cards. Cards on a stage you remove step back to the stage before it.
+        </p>
+        <form id="work-types-form" class="work-types" @submit.prevent="saveKindDrafts">
+          <div v-for="(kind, kindIndex) in kindDrafts" :key="kind.key" class="work-type-row">
+            <div class="work-type-head">
+              <label class="work-type-name">
+                <span>Name<template v-if="kindIndex === 0"> · default for new cards</template></span>
+                <input v-model="kind.label" required :maxlength="KIND_LABEL_MAX_LENGTH" placeholder="Work type name" autocomplete="off" />
+              </label>
+              <button type="button" class="btn-icon" :disabled="kindIndex === 0" :aria-label="'Move ' + (kind.label || 'work type') + ' up'" title="Move up" @click="moveInList(kindDrafts, kindIndex, -1)"><PhArrowUp :size="15" /></button>
+              <button type="button" class="btn-icon" :disabled="kindIndex === kindDrafts.length - 1" :aria-label="'Move ' + (kind.label || 'work type') + ' down'" title="Move down" @click="moveInList(kindDrafts, kindIndex, 1)"><PhArrowDown :size="15" /></button>
+              <button type="button" class="btn-icon danger" :disabled="kindDrafts.length === 1" :aria-label="'Remove ' + (kind.label || 'work type')" :title="kindDrafts.length === 1 ? 'Keep at least one work type' : 'Remove work type'" @click="removeKindDraft(kindIndex)"><PhTrash :size="15" /></button>
+            </div>
+            <ol class="work-type-stages" :aria-label="'Stages for ' + (kind.label || 'work type')">
+              <li class="stage-chip fixed">{{ FIRST_STAGE.label }}</li>
+              <li v-for="(stage, stageIndex) in kind.stages" :key="stage.key" class="stage-chip">
+                <button type="button" class="stage-chip-move" :disabled="stageIndex === 0" :aria-label="'Move ' + (stage.label || 'stage') + ' earlier'" @click="moveInList(kind.stages, stageIndex, -1)"><PhArrowLeft :size="12" /></button>
+                <input
+                  v-model="stage.label"
+                  :data-stage-key="stage.key"
+                  :maxlength="STAGE_LABEL_MAX_LENGTH"
+                  :size="Math.max(4, stage.label.length)"
+                  placeholder="Stage"
+                  :aria-label="'Stage ' + (stageIndex + 2) + ' name'"
+                  autocomplete="off"
+                  @keydown.backspace="!stage.label && kind.stages.splice(stageIndex, 1)"
+                />
+                <button type="button" class="stage-chip-move" :disabled="stageIndex === kind.stages.length - 1" :aria-label="'Move ' + (stage.label || 'stage') + ' later'" @click="moveInList(kind.stages, stageIndex, 1)"><PhArrowRight :size="12" /></button>
+                <button type="button" class="stage-chip-move" :aria-label="'Remove ' + (stage.label || 'stage')" @click="kind.stages.splice(stageIndex, 1)"><PhX :size="12" /></button>
+              </li>
+              <li v-if="kind.stages.length < STAGES_MAX">
+                <button type="button" class="stage-chip add" @click="addStageDraft(kind)"><PhPlus :size="12" /> Stage</button>
+              </li>
+              <li class="stage-chip fixed">{{ LAST_STAGE.label }}</li>
+            </ol>
+          </div>
+          <div class="work-types-actions">
+            <button type="button" class="btn" :disabled="settingsBusy || kindDrafts.length >= KINDS_MAX" @click="addKindDraft"><PhPlus :size="14" /> Add work type</button>
+            <span class="spacer"></span>
+            <button type="button" class="btn" :disabled="settingsBusy || !kindDraftsDirty" @click="resetKindDrafts">Revert</button>
+            <button type="submit" class="btn btn-primary" :disabled="settingsBusy || !kindDraftsDirty">Save work types</button>
+          </div>
+        </form>
+      </section>
       <div class="dialog-actions">
         <span class="spacer"></span>
         <button class="btn" :disabled="settingsBusy" @click="settingsDialogEl?.close()">Close</button>
       </div>
     </div>
   </dialog>
+
+  <CommandPalette v-model:open="paletteOpen" v-model:query="paletteQuery" :items="paletteItems" :loading="paletteLoading" />
 
   <!-- Card dialog -->
   <dialog ref="cardDialogEl" class="card-dialog" @close="onCardDialogClose">
@@ -2659,6 +3207,21 @@ onBeforeUnmount(() => {
       </label>
       <div class="card-dialog-grid">
         <div class="card-dialog-fields">
+          <div class="card-dialog-location">
+            <label>
+              Board
+              <select v-model="cardMoveBoardId" class="kind-select dialog-kind-select" @change="onCardMoveBoardChange">
+                <option v-for="entry in boards" :key="entry.id" :value="entry.id">{{ entry.emoji }} {{ entry.name }}</option>
+              </select>
+            </label>
+            <label>
+              Column
+              <select v-model="cardMoveColumnId" class="kind-select dialog-kind-select">
+                <option v-for="col in cardMoveColumns" :key="col.id" :value="col.id">{{ col.title }}</option>
+                <option value="">+ New column</option>
+              </select>
+            </label>
+          </div>
           <div class="card-dialog-jira">
             <div class="card-dialog-field-heading">
               <label for="card-jira-key-input">Jira key</label>
@@ -2699,7 +3262,7 @@ onBeforeUnmount(() => {
               @change="onDialogKindChange"
             >
               <option
-                v-for="kind in CARD_KINDS"
+                v-for="kind in cardKinds()"
                 :key="kind.id"
                 :value="kind.id"
               >{{ kind.label }}</option>
@@ -2817,9 +3380,51 @@ onBeforeUnmount(() => {
       </div>
       <div class="dialog-actions">
         <button v-if="cardDeleteVisible" type="button" class="btn btn-danger" @click="deleteCardFromDialog">Archive</button>
+        <button
+          v-if="cardDialogCardId"
+          type="button"
+          class="btn"
+          title="Copy a link to this card. Whoever opens it in their PeteyPlan can add a copy to their board."
+          @click="copyCardShareLink"
+        >
+          <PhCheck v-if="shareLinkCopied" :size="15" weight="bold" />
+          <PhLink v-else :size="15" weight="bold" />
+          <span aria-live="polite">{{ shareLinkCopied ? 'Link copied' : 'Copy link' }}</span>
+        </button>
         <span class="spacer"></span>
         <button type="button" class="btn" @click="closeCardDialog">Cancel</button>
         <button type="button" class="btn btn-primary" @click="saveCardFromDialog">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Shared card dialog -->
+  <dialog ref="shareDialogEl" class="share-dialog" aria-labelledby="share-dialog-title" @close="onShareDialogClose">
+    <form v-if="sharedCard" method="dialog" class="dialog-form" @submit.prevent="addSharedCard">
+      <h2 id="share-dialog-title">Shared card<span v-if="sharedCard.ref" class="card-dialog-ref">{{ sharedCard.ref }}</span></h2>
+      <div class="share-preview">
+        <p class="share-preview-title">{{ sharedCard.title }}</p>
+        <p class="share-preview-meta">{{ sharedCardSummary }}</p>
+        <div v-if="sharedCard.description" class="share-preview-desc md-body" v-html="renderDescHtml(sharedCard.description)"></div>
+      </div>
+      <div class="share-targets">
+        <label>
+          Board
+          <select v-model="shareBoardId" class="kind-select dialog-kind-select" @change="loadShareColumns">
+            <option v-for="entry in boards" :key="entry.id" :value="entry.id">{{ entry.emoji }} {{ entry.name }}</option>
+          </select>
+        </label>
+        <label>
+          Column
+          <select v-model="shareColumnId" class="kind-select dialog-kind-select" :disabled="!shareColumns.length">
+            <option v-for="col in shareColumns" :key="col.id" :value="col.id">{{ col.title }}</option>
+          </select>
+        </label>
+      </div>
+      <div class="dialog-actions">
+        <span class="spacer"></span>
+        <button type="button" class="btn" @click="closeShareDialog">Cancel</button>
+        <button type="submit" class="btn btn-primary" autofocus :disabled="!shareColumnId || shareBusy">Add to board</button>
       </div>
     </form>
   </dialog>

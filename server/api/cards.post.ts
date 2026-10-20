@@ -2,7 +2,7 @@ import { normalizeChecklist } from '../../shared/checklist'
 import { addCard, cardRef } from '../db'
 import { normalizeDueBy } from '../utils/due'
 import { normalizeJiraKey } from '../utils/jira'
-import { DEFAULT_KIND, DEFAULT_PROGRESS, normalizeKind, normalizeProgress } from '../utils/progress'
+import { DEFAULT_PROGRESS, defaultKind, normalizeKind, normalizeProgress } from '../utils/progress'
 
 export default defineEventHandler(async (event) => {
   const body = await readBody<{
@@ -23,7 +23,7 @@ export default defineEventHandler(async (event) => {
   const jiraKey =
     typeof body?.jiraKey === 'string' ? normalizeJiraKey(body.jiraKey) : ''
   const dueBy = typeof body?.dueBy === 'string' ? normalizeDueBy(body.dueBy) : ''
-  const kind = body?.kind !== undefined ? normalizeKind(body.kind) : DEFAULT_KIND
+  const kind = body?.kind !== undefined ? normalizeKind(body.kind) : defaultKind()
   const progress =
     body?.progress !== undefined ? normalizeProgress(body.progress, kind) : DEFAULT_PROGRESS
   const markViewed = body?.markViewed === true
