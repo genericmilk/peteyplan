@@ -40,6 +40,7 @@ legacy.exec(`
 legacy.close()
 const db = await import('../server/db.ts')
 const { isBoardEmoji } = await import('../shared/boards.ts')
+const { normalizeChecklist } = await import('../shared/checklist.ts')
 const defaultId = db.DEFAULT_BOARD_ID
 
 test('boards preserve data, isolate content and transfer items safely', async (t) => {
@@ -113,12 +114,31 @@ test('boards preserve data, isolate content and transfer items safely', async (t
     assert.equal(db.getBoard(empty.id).columns[0].cards[0].id, card.id)
   })
 
+  await t.test('stores checklists on cards, keeping item ids and dropping blank items', () => {
+    assert.deepEqual(db.getBoard(empty.id).columns[0].cards[0].checklist, [])
+    db.updateCard(card.id, { checklist: [
+      { id: 'a', text: '  Write  tests ', done: true },
+      { id: 'b', text: '   ' },
+      { id: 'c', text: 'Ship it' },
+    ] })
+    assert.deepEqual(db.getBoard(empty.id).columns[0].cards[0].checklist, [
+      { id: 'a', text: 'Write tests', done: true },
+      { id: 'c', text: 'Ship it', done: false },
+    ])
+    db.updateCard(card.id, { title: 'Renamed' })
+    assert.equal(db.getBoard(empty.id).columns[0].cards[0].checklist.length, 2)
+    const created = db.addCard(db.getBoard(empty.id).columns[0].id, 'With list', '', '', '', 'todo', 'chore', true, [{ text: 'First' }])
+    assert.equal(db.getBoard(empty.id).columns[0].cards.find((entry) => entry.id === created.id).checklist[0].text, 'First')
+    db.deleteCard(created.id)
+  })
+
   await t.test('persists settings and does not reseed intentionally empty boards', async () => {
     db.deleteColumn('legacy-column')
     const reopened = await import('../server/db.ts?reopen')
     assert.equal(reopened.getBoards()[0].name, 'My work')
     assert.equal(reopened.getBoard().columns.length, 0)
     assert.equal(reopened.getBoard(empty.id).columns[0].cards[0].id, card.id)
+    assert.equal(reopened.getBoard(empty.id).columns[0].cards[0].checklist.length, 2)
   })
 
   await t.test('deletes nondefault board contents without affecting other boards', () => {
@@ -135,4 +155,13 @@ test('boards preserve data, isolate content and transfer items safely', async (t
 test('requires one emoji, including flags and joined sequences', () => {
   for (const emoji of ['📋', '🌱', '🇬🇧', '👩🏽‍💻', '1️⃣']) assert.equal(isBoardEmoji(emoji), true, emoji)
   for (const text of ['', 'abc', '#', '🌱🌙', 'hello 📋']) assert.equal(isBoardEmoji(text), false, text)
+})
+
+test('normalizes untrusted checklist input', () => {
+  assert.deepEqual(normalizeChecklist('not json'), [])
+  assert.deepEqual(normalizeChecklist({ text: 'x' }), [])
+  const items = normalizeChecklist(['Plain', { id: 'dup', text: 'One' }, { id: 'dup', text: 'Two', done: 'yes' }, 5, null])
+  assert.deepEqual(items.map((item) => [item.text, item.done]), [['Plain', false], ['One', false], ['Two', false]])
+  assert.equal(new Set(items.map((item) => item.id)).size, 3)
+  assert.equal(normalizeChecklist(Array.from({ length: 150 }, (_, i) => `Item ${i}`)).length, 100)
 })

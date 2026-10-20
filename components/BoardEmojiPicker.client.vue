@@ -2,6 +2,7 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, useId } from 'vue'
 import EmojiPicker, { type EmojiSelection } from 'vue3-emoji-picker'
 import 'vue3-emoji-picker/css'
+import { usePreferences } from '~/composables/usePreferences'
 
 defineProps<{ label: string; disabled?: boolean }>()
 const model = defineModel<string>({ required: true })
@@ -9,6 +10,7 @@ const open = ref(false)
 const panel = ref<HTMLElement | null>(null)
 const trigger = ref<HTMLButtonElement | null>(null)
 const panelId = useId()
+const { resolvedTheme } = usePreferences()
 
 async function toggle() {
   if (open.value) { close(); return }
@@ -95,7 +97,7 @@ onBeforeUnmount(() => {
       @focusout="onBlur"
       @toggle="onToggle"
     >
-      <EmojiPicker v-if="open" :native="true" :hide-search="false" theme="dark" @select="selectEmoji" />
+      <EmojiPicker v-if="open" :native="true" :hide-search="false" :theme="resolvedTheme" @select="selectEmoji" />
     </div>
   </div>
 </template>

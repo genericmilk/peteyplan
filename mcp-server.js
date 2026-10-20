@@ -108,8 +108,16 @@ server.tool(
       .enum(["todo", "building", "review", "deploy", "qa", "doing", "waiting", "followup", "done"])
       .optional()
       .describe("Progress stage for the card's work type (optional; defaults to todo)"),
+    checklist: z
+      .array(z.object({
+        id: z.string().optional().describe("Existing item ID (keep to preserve the item)"),
+        text: z.string().describe("Checklist item text"),
+        done: z.boolean().optional().describe("Whether the item is ticked"),
+      }))
+      .optional()
+      .describe("To-do items inside the card (optional)"),
   },
-  async ({ columnId, title, description, jiraKey, dueBy, kind, progress }) => {
+  async ({ columnId, title, description, jiraKey, dueBy, kind, progress, checklist }) => {
     const card = await api("/api/cards", {
       method: "POST",
       body: JSON.stringify({
@@ -120,6 +128,7 @@ server.tool(
         dueBy: dueBy || "",
         kind: kind || "development",
         progress: progress || "todo",
+        checklist: checklist || [],
       }),
     });
     return { content: [{ type: "text", text: boardText(card) }] };
@@ -128,7 +137,7 @@ server.tool(
 
 server.tool(
   "update_card",
-  "Update a card's title, description, Jira key, due date, work type, and/or progress stage. Changing dueBy re-ranks the column. cardId accepts a card ID or PP-n ref (e.g. PP-12).",
+  "Update a card's title, description, Jira key, due date, work type, progress stage, and/or checklist. Changing dueBy re-ranks the column. cardId accepts a card ID or PP-n ref (e.g. PP-12).",
   {
     columnId: z.string().describe("The column ID containing the card (kept for compatibility)"),
     cardId: z.string().describe("The card ID or PP-n ref to update (e.g. PP-12)"),
@@ -150,8 +159,16 @@ server.tool(
       .enum(["todo", "building", "review", "deploy", "qa", "doing", "waiting", "followup", "done"])
       .optional()
       .describe("Progress stage for the card's work type"),
+    checklist: z
+      .array(z.object({
+        id: z.string().optional().describe("Existing item ID (keep to preserve the item)"),
+        text: z.string().describe("Checklist item text"),
+        done: z.boolean().optional().describe("Whether the item is ticked"),
+      }))
+      .optional()
+      .describe("Full replacement checklist (omit to keep current; pass existing item IDs to keep them; [] clears it)"),
   },
-  async ({ cardId, title, description, jiraKey, dueBy, kind, progress }) => {
+  async ({ cardId, title, description, jiraKey, dueBy, kind, progress, checklist }) => {
     const body = {};
     if (title !== undefined) body.title = title;
     if (description !== undefined) body.description = description;
@@ -159,6 +176,7 @@ server.tool(
     if (dueBy !== undefined) body.dueBy = dueBy;
     if (kind !== undefined) body.kind = kind;
     if (progress !== undefined) body.progress = progress;
+    if (checklist !== undefined) body.checklist = checklist;
     const card = await api(`/api/cards/${encodeURIComponent(cardId)}`, {
       method: "PATCH",
       body: JSON.stringify(body),

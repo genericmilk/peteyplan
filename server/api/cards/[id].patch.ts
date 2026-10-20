@@ -1,3 +1,4 @@
+import { normalizeChecklist } from '../../../shared/checklist'
 import { cardRef, resolveCardId, updateCard } from '../../db'
 import { normalizeDueBy } from '../../utils/due'
 import { normalizeJiraKey } from '../../utils/jira'
@@ -14,6 +15,7 @@ export default defineEventHandler(async (event) => {
     progress?: unknown
     releaseId?: unknown
     viewed?: unknown
+    checklist?: unknown
   }>(event)
 
   const changes: {
@@ -25,6 +27,7 @@ export default defineEventHandler(async (event) => {
     progress?: ReturnType<typeof normalizeProgress>
     releaseId?: string | null
     viewed?: boolean
+    checklist?: ReturnType<typeof normalizeChecklist>
   } = {}
   if (body?.title !== undefined) {
     const title = typeof body.title === 'string' ? body.title.trim() : ''
@@ -64,6 +67,12 @@ export default defineEventHandler(async (event) => {
   if (body?.viewed === true) {
     changes.viewed = true
   }
+  if (body?.checklist !== undefined) {
+    if (!Array.isArray(body.checklist)) {
+      throw createError({ statusCode: 400, statusMessage: 'checklist must be an array' })
+    }
+    changes.checklist = normalizeChecklist(body.checklist)
+  }
 
   const card = updateCard(resolveCardId(id!), changes)
   if (!card) {
@@ -82,6 +91,7 @@ export default defineEventHandler(async (event) => {
     completedAt: card.completed_at,
     archivedAt: card.archived_at,
     viewedAt: card.viewed_at,
+    checklist: normalizeChecklist(card.checklist),
     columnId: card.column_id,
     releaseId: card.release_id,
     position: card.position,
