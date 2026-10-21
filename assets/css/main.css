@@ -29,7 +29,7 @@
   --border-strong: rgba(255, 255, 255, 0.15);
   --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.07);
   --blur: 22px;
-  --ambient-strength: 46%;
+  --ambient-strength: 66%;
   --text: #eceef3;
   --text-muted: #9198a7;
   --accent: #6b95ff;
@@ -82,7 +82,7 @@
   --border: rgba(20, 28, 45, 0.09);
   --border-strong: rgba(20, 28, 45, 0.16);
   --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.85);
-  --ambient-strength: 30%;
+  --ambient-strength: 44%;
   --text: #171b24;
   --text-muted: #5b6475;
   --accent: #3565e0;
@@ -167,10 +167,10 @@ body::before {
     linear-gradient(
       135deg,
       color-mix(in srgb, var(--ambient) var(--ambient-strength), transparent) 0%,
-      color-mix(in srgb, var(--ambient) calc(var(--ambient-strength) * 0.8), transparent) 18%,
-      color-mix(in srgb, var(--ambient) calc(var(--ambient-strength) * 0.55), transparent) 40%,
-      color-mix(in srgb, var(--ambient) calc(var(--ambient-strength) * 0.32), transparent) 65%,
-      color-mix(in srgb, var(--ambient) calc(var(--ambient-strength) * 0.18), transparent) 100%
+      color-mix(in srgb, var(--ambient) calc(var(--ambient-strength) * 0.86), transparent) 18%,
+      color-mix(in srgb, var(--ambient) calc(var(--ambient-strength) * 0.66), transparent) 40%,
+      color-mix(in srgb, var(--ambient) calc(var(--ambient-strength) * 0.44), transparent) 65%,
+      color-mix(in srgb, var(--ambient) calc(var(--ambient-strength) * 0.28), transparent) 100%
     ),
     var(--canvas);
 }
