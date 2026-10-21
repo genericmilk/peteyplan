@@ -2511,7 +2511,7 @@ function onBoardWheel(event: WheelEvent) {
 
   const index = boards.value.findIndex((entry) => entry.id === activeBoardId.value)
   const neighbour = index < 0 ? undefined : boards.value[index + direction]
-  if (!neighbour || switchingBoardId.value || prefs.value.elasticity === 'none') return
+  if (!neighbour || switchingBoardId.value) return
   event.preventDefault()
   // At the board's edge mid-pan — hold while that scroll (or its momentum) carries on,
   // so only a fresh scroll after a pause pulls in the next board.
@@ -3117,7 +3117,7 @@ onBeforeUnmount(() => {
     </div>
   </main>
   <div
-    v-if="boardPull"
+    v-if="boardPull && prefs.elasticity !== 'none'"
     class="board-pull-peek"
     :class="[boardPull.direction > 0 ? 'is-next' : 'is-prev', { releasing: boardPull.releasing, direct: boardPull.fine && !boardPull.releasing, ready: boardPull.progress > 0.8 }]"
     :style="{ '--board-color': boardPull.color, '--pull-offset': boardPull.offset + 'px', '--pull-progress': boardPull.progress }"
@@ -3223,7 +3223,7 @@ onBeforeUnmount(() => {
         <div class="setting-row">
           <div class="setting-label">
             <h3>Edge elasticity</h3>
-            <p>Scrolling past a board's edge stretches it and pulls in the next board. None stops at the edge.</p>
+            <p>Scrolling past a board's edge stretches it and pulls in the next board. None switches without the stretch.</p>
           </div>
           <div class="segmented" role="radiogroup" aria-label="Edge elasticity">
             <button

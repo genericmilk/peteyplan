@@ -42,12 +42,13 @@ export const SURFACE_OPTIONS: { id: SurfacePref; label: string }[] = [
 /**
  * How the board stretches when scrolled past its edge into the next board.
  * `distance` scales how far you scroll to break through; `stretch` how far the board gives.
+ * None keeps scroll-to-switch but drops the stretch and peek.
  */
 export const ELASTICITY_OPTIONS: { id: ElasticityPref; label: string; distance: number; stretch: number }[] = [
   { id: 'loose', label: 'Loose', distance: 0.6, stretch: 1.2 },
   { id: 'normal', label: 'Normal', distance: 1, stretch: 1 },
   { id: 'firm', label: 'Firm', distance: 1.6, stretch: 0.8 },
-  { id: 'none', label: 'None', distance: 0, stretch: 0 },
+  { id: 'none', label: 'None', distance: 1, stretch: 0 },
 ]
 
 /** Kept in sync with the pre-paint script in nuxt.config.ts. */
