@@ -42,7 +42,7 @@ export const SURFACE_OPTIONS: { id: SurfacePref; label: string }[] = [
 /**
  * How the board stretches when scrolled past its edge into the next board.
  * `distance` scales how far you scroll to break through; `stretch` how far the board gives.
- * None keeps scroll-to-switch but drops the stretch and peek.
+ * None drops the stretch and peek: a fresh scroll at the edge switches straight away.
  */
 export const ELASTICITY_OPTIONS: { id: ElasticityPref; label: string; distance: number; stretch: number }[] = [
   { id: 'loose', label: 'Loose', distance: 0.6, stretch: 1.2 },
