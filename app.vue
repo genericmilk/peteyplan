@@ -2519,6 +2519,12 @@ function onBoardWheel(event: WheelEvent) {
     boardScrollLockUntil = now + COLUMN_SCROLL_UNLOCK_MS
     return
   }
+  // Nothing to stretch, so a fresh scroll at the edge switches straight away.
+  if (prefs.value.elasticity === 'none') {
+    boardPullSwallowUntil = now + BOARD_PULL_IDLE_MS
+    void switchBoard(neighbour.id)
+    return
+  }
   if (boardPull.value?.id !== neighbour.id || boardPull.value.releasing) {
     // Trackpads send a stream of small pixel deltas; mouse wheels send coarse notches.
     startBoardPull(neighbour, direction, event.deltaMode === WheelEvent.DOM_DELTA_PIXEL && amount < 50)
@@ -3223,7 +3229,7 @@ onBeforeUnmount(() => {
         <div class="setting-row">
           <div class="setting-label">
             <h3>Edge elasticity</h3>
-            <p>Scrolling past a board's edge stretches it and pulls in the next board. None switches without the stretch.</p>
+            <p>Scrolling past a board's edge stretches it and pulls in the next board. With None, scrolling past the edge switches boards straight away.</p>
           </div>
           <div class="segmented" role="radiogroup" aria-label="Edge elasticity">
             <button
