@@ -69,6 +69,7 @@ import {
 } from '~/shared/share'
 import {
   DENSITY_OPTIONS,
+  ELASTICITY_OPTIONS,
   MOTION_OPTIONS,
   SURFACE_OPTIONS,
   THEME_OPTIONS,
@@ -2510,7 +2511,7 @@ function onBoardWheel(event: WheelEvent) {
 
   const index = boards.value.findIndex((entry) => entry.id === activeBoardId.value)
   const neighbour = index < 0 ? undefined : boards.value[index + direction]
-  if (!neighbour || switchingBoardId.value) return
+  if (!neighbour || switchingBoardId.value || prefs.value.elasticity === 'none') return
   event.preventDefault()
   // At the board's edge mid-pan — hold while that scroll (or its momentum) carries on,
   // so only a fresh scroll after a pause pulls in the next board.
@@ -2567,8 +2568,9 @@ function pullBoard(amount: number) {
   clearTimeout(boardPullIdleTimer)
   boardPullDistance = Math.max(0, boardPullDistance + amount)
   if (!boardPullDistance) { resetBoardPull(); return }
-  const commit = pull.fine ? BOARD_PULL_COMMIT_FINE : BOARD_PULL_COMMIT
-  const offset = BOARD_PULL_MAX * (1 - Math.exp(-boardPullDistance / (commit * 0.75)))
+  const elasticity = ELASTICITY_OPTIONS.find((option) => option.id === prefs.value.elasticity)!
+  const commit = (pull.fine ? BOARD_PULL_COMMIT_FINE : BOARD_PULL_COMMIT) * elasticity.distance
+  const offset = BOARD_PULL_MAX * elasticity.stretch * (1 - Math.exp(-boardPullDistance / (commit * 0.75)))
   if (boardPullDistance >= commit) {
     boardPullSwallowUntil = performance.now() + BOARD_PULL_IDLE_MS
     void switchBoard(pull.id, offset)
@@ -3215,6 +3217,22 @@ onBeforeUnmount(() => {
               role="radio"
               :aria-checked="prefs.motion === option.id"
               @click="prefs.motion = option.id"
+            >{{ option.label }}</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">
+            <h3>Edge elasticity</h3>
+            <p>Scrolling past a board's edge stretches it and pulls in the next board. None stops at the edge.</p>
+          </div>
+          <div class="segmented" role="radiogroup" aria-label="Edge elasticity">
+            <button
+              v-for="option in ELASTICITY_OPTIONS"
+              :key="option.id"
+              type="button"
+              role="radio"
+              :aria-checked="prefs.elasticity === option.id"
+              @click="prefs.elasticity = option.id"
             >{{ option.label }}</button>
           </div>
         </div>
