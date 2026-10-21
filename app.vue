@@ -520,9 +520,11 @@ async function refreshBoard() {
 /** Total duration of the board-switch slide, shared across every board it passes. */
 const BOARD_SWITCH_MS = 100
 
-async function switchBoard(id: string) {
+/** `pulled` is how far an elastic wheel pull already slid the board, so the slide picks up from there. */
+async function switchBoard(id: string, pulled = 0) {
   cancelPillHover()
   cancelBoardPan?.()
+  resetBoardPull()
   if (id === activeBoardId.value) {
     ++boardRequest
     switchingBoardId.value = null
@@ -581,17 +583,18 @@ async function switchBoard(id: string) {
       if (el) el.scrollLeft = 0
       if (snapshot && el) {
         const width = el.clientWidth
+        const start = index === 0 ? Math.min(pulled, width) : 0
         const duration = Math.max(0, (deadline - performance.now()) / stepsLeft)
         const easing = steps.length === 1 ? 'cubic-bezier(.2,.65,.35,1)'
           : index === 0 ? 'cubic-bezier(.45,0,1,1)'
           : index === steps.length - 1 ? 'cubic-bezier(0,0,.55,1)' : 'linear'
         await new Promise<void>((resolve) => {
           const outgoing = snapshot.animate([
-            { transform: 'translateX(0)' },
+            { transform: `translateX(${-direction * start}px)` },
             { transform: `translateX(${-direction * width}px)` },
           ], { duration, easing, fill: 'forwards' })
           const incoming = el.animate([
-            { transform: `translateX(${direction * width}px)` },
+            { transform: `translateX(${direction * (width - start)}px)` },
             { transform: 'translateX(0)' },
           ], { duration, easing, fill: 'forwards' })
           const finish = () => {
@@ -2428,14 +2431,20 @@ function onDocumentKeydown(event: KeyboardEvent) {
   void openPalette()
 }
 
-/** After scrolling a column, keep horizontal pan locked briefly so overscroll doesn't jump sideways. */
+/**
+ * After scrolling a column, keep horizontal pan locked briefly so overscroll doesn't jump sideways.
+ * Panning the board locks off the pull into the next board the same way.
+ */
 const COLUMN_SCROLL_UNLOCK_MS = 250
 let columnScrollLockUntil = 0
+let boardScrollLockUntil = 0
 
 /**
  * Wheel over a column scrolls that column vertically first.
  * Horizontal board pan unlocks 250ms after the last column scroll movement
  * (or immediately when not mid-column-scroll / outside a scrollable column).
+ * Likewise, pulling past the board's edge into the next board unlocks once the
+ * scroll that panned the board there has paused for 250ms.
  */
 function onBoardWheel(event: WheelEvent) {
   if (event.ctrlKey || event.metaKey) return
@@ -2468,16 +2477,135 @@ function onBoardWheel(event: WheelEvent) {
     }
   }
 
-  if (board.scrollWidth <= board.clientWidth + 1) return
   const delta = dominantHorizontal ? event.deltaX : event.deltaY
   if (!delta) return
 
-  const max = board.scrollWidth - board.clientWidth
-  const next = Math.min(max, Math.max(0, board.scrollLeft + delta))
-  if (next === board.scrollLeft) return
+  // Swallow the tail of the gesture that just broke into a board.
+  if (now < boardPullSwallowUntil) {
+    boardPullSwallowUntil = now + BOARD_PULL_IDLE_MS
+    event.preventDefault()
+    return
+  }
 
-  board.scrollLeft = next
+  const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16
+    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? board.clientWidth : 1
+  const direction = Math.sign(delta) as 1 | -1
+  const amount = Math.abs(delta) * unit
+
+  // Scrolling back against a pull eases it out before the board scrolls again.
+  if (boardPull.value && !boardPull.value.releasing && direction !== boardPull.value.direction) {
+    pullBoard(-amount)
+    event.preventDefault()
+    return
+  }
+
+  const max = Math.max(0, board.scrollWidth - board.clientWidth)
+  const next = Math.min(max, Math.max(0, board.scrollLeft + delta))
+  if (next !== board.scrollLeft) {
+    board.scrollLeft = next
+    boardScrollLockUntil = now + COLUMN_SCROLL_UNLOCK_MS
+    event.preventDefault()
+    return
+  }
+
+  const index = boards.value.findIndex((entry) => entry.id === activeBoardId.value)
+  const neighbour = index < 0 ? undefined : boards.value[index + direction]
+  if (!neighbour || switchingBoardId.value) return
   event.preventDefault()
+  // At the board's edge mid-pan — hold while that scroll (or its momentum) carries on,
+  // so only a fresh scroll after a pause pulls in the next board.
+  if (now < boardScrollLockUntil) {
+    boardScrollLockUntil = now + COLUMN_SCROLL_UNLOCK_MS
+    return
+  }
+  if (boardPull.value?.id !== neighbour.id || boardPull.value.releasing) {
+    // Trackpads send a stream of small pixel deltas; mouse wheels send coarse notches.
+    startBoardPull(neighbour, direction, event.deltaMode === WheelEvent.DOM_DELTA_PIXEL && amount < 50)
+  }
+  pullBoard(amount)
+}
+
+/** Wheel distance past the board's edge that breaks into the neighbouring board. */
+const BOARD_PULL_COMMIT = 420
+/** Trackpads follow the finger directly, so they break through sooner. */
+const BOARD_PULL_COMMIT_FINE = 220
+/** Furthest the board stretches, approached asymptotically. */
+const BOARD_PULL_MAX = 180
+/** A pause this long abandons the pull (and ends the swallow lock). */
+const BOARD_PULL_IDLE_MS = 160
+const BOARD_PULL_RELEASE_MS = 280
+
+const boardPull = ref<{
+  id: string
+  name: string
+  emoji: string
+  color: string
+  direction: 1 | -1
+  offset: number
+  progress: number
+  releasing: boolean
+  fine: boolean
+} | null>(null)
+let boardPullDistance = 0
+let boardPullSwallowUntil = 0
+let boardPullIdleTimer: ReturnType<typeof setTimeout> | undefined
+let boardPullReleaseTimer: ReturnType<typeof setTimeout> | undefined
+
+function startBoardPull(entry: BoardInfo, direction: 1 | -1, fine: boolean) {
+  clearTimeout(boardPullReleaseTimer)
+  boardPullDistance = 0
+  boardPull.value = {
+    id: entry.id, name: entry.name, emoji: entry.emoji, color: entry.color,
+    direction, offset: 0, progress: 0, releasing: false, fine,
+  }
+}
+
+function pullBoard(amount: number) {
+  const pull = boardPull.value
+  const el = boardEl.value
+  if (!pull || !el) return
+  clearTimeout(boardPullIdleTimer)
+  boardPullDistance = Math.max(0, boardPullDistance + amount)
+  if (!boardPullDistance) { resetBoardPull(); return }
+  const commit = pull.fine ? BOARD_PULL_COMMIT_FINE : BOARD_PULL_COMMIT
+  const offset = BOARD_PULL_MAX * (1 - Math.exp(-boardPullDistance / (commit * 0.75)))
+  if (boardPullDistance >= commit) {
+    boardPullSwallowUntil = performance.now() + BOARD_PULL_IDLE_MS
+    void switchBoard(pull.id, offset)
+    return
+  }
+  pull.offset = offset
+  pull.progress = boardPullDistance / commit
+  // Smooth out mouse-wheel notches; trackpad deltas are already continuous.
+  el.classList.toggle('board-pulling', !pull.fine)
+  el.style.transform = `translateX(${-pull.direction * offset}px)`
+  boardPullIdleTimer = setTimeout(releaseBoardPull, BOARD_PULL_IDLE_MS)
+}
+
+/** Abandoned pull: spring the board back and let the peek slide away. */
+function releaseBoardPull() {
+  const pull = boardPull.value
+  const el = boardEl.value
+  if (!pull || !el) return
+  boardPullDistance = 0
+  pull.offset = 0
+  pull.progress = 0
+  pull.releasing = true
+  el.classList.remove('board-pulling')
+  el.classList.add('board-pull-release')
+  el.style.transform = ''
+  boardPullReleaseTimer = setTimeout(resetBoardPull, BOARD_PULL_RELEASE_MS)
+}
+
+function resetBoardPull() {
+  clearTimeout(boardPullIdleTimer)
+  clearTimeout(boardPullReleaseTimer)
+  boardPullDistance = 0
+  boardPull.value = null
+  const el = boardEl.value
+  if (!el) return
+  el.classList.remove('board-pulling', 'board-pull-release')
+  el.style.transform = ''
 }
 
 const boardPillsEl = ref<HTMLElement | null>(null)
@@ -2525,6 +2653,7 @@ onBeforeUnmount(() => {
   ++boardRequest
   cancelBoardPan?.()
   cancelPillHover()
+  resetBoardPull()
   document.removeEventListener('mousedown', onDocumentMousedown)
   document.removeEventListener('keydown', onDocumentKeydown)
   window.removeEventListener('hashchange', openShareFromHash)
@@ -2985,6 +3114,16 @@ onBeforeUnmount(() => {
       <button class="btn btn-primary" @click="openColumnDialog(null)"><PhPlus :size="15" weight="bold" aria-hidden="true" />Add column</button>
     </div>
   </main>
+  <div
+    v-if="boardPull"
+    class="board-pull-peek"
+    :class="[boardPull.direction > 0 ? 'is-next' : 'is-prev', { releasing: boardPull.releasing, direct: boardPull.fine && !boardPull.releasing, ready: boardPull.progress > 0.8 }]"
+    :style="{ '--board-color': boardPull.color, '--pull-offset': boardPull.offset + 'px', '--pull-progress': boardPull.progress }"
+    aria-hidden="true"
+  >
+    <span class="board-pull-emoji">{{ boardPull.emoji }}</span>
+    <span class="board-pull-name">{{ boardPull.name }}</span>
+  </div>
   </div>
 
   <dialog ref="settingsDialogEl" class="settings-dialog" aria-labelledby="board-settings-title" @cancel="settingsBusy && $event.preventDefault()">

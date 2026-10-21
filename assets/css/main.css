@@ -804,6 +804,46 @@ button.release-ticket {
 /* Board */
 .board-viewport { position: relative; display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden; }
 .board-pan-snapshot { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.board.board-pulling { transition: transform calc(120ms * var(--motion)) ease-out; }
+.board.board-pull-release { transition: transform calc(280ms * var(--motion)) cubic-bezier(.2, 1.4, .4, 1); }
+
+/* Neighbouring board teased in from the edge while the wheel pulls past it. */
+.board-pull-peek {
+  --peek-width: 180px;
+  position: absolute;
+  top: 14px;
+  bottom: 16px;
+  width: var(--peek-width);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, var(--board-color) calc(20% + 40% * var(--pull-progress)), transparent);
+  background: color-mix(in srgb, var(--board-color) calc(8% + 14% * var(--pull-progress)), var(--surface, transparent));
+  backdrop-filter: blur(var(--blur));
+  pointer-events: none;
+  opacity: calc(0.35 + 0.65 * var(--pull-progress));
+  transition: transform calc(120ms * var(--motion)) ease-out, opacity calc(120ms * var(--motion)), border-color calc(150ms * var(--motion));
+}
+.board-pull-peek.is-next { right: 0; transform: translateX(calc(100% + 12px - var(--pull-offset))); }
+.board-pull-peek.is-prev { left: 0; transform: translateX(calc(-100% - 12px + var(--pull-offset))); }
+.board-pull-peek.direct { transition-property: opacity, border-color; }
+.board-pull-peek.releasing { transition-duration: calc(280ms * var(--motion)); opacity: 0; }
+.board-pull-emoji { font-size: 28px; line-height: 1; transform: scale(calc(0.8 + 0.25 * var(--pull-progress))); transition: transform calc(120ms * var(--motion)) ease-out; }
+.board-pull-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+}
+.board-pull-peek.ready .board-pull-emoji { transform: scale(1.12); }
 .board {
   flex: 1 1 auto;
   display: flex;
