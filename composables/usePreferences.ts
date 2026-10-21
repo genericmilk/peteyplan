@@ -6,12 +6,14 @@ export type ThemePref = 'system' | 'light' | 'dark'
 export type MotionPref = 'snappy' | 'normal' | 'relaxed' | 'off'
 export type DensityPref = 'comfortable' | 'compact'
 export type SurfacePref = 'glass' | 'solid'
+export type ElasticityPref = 'loose' | 'normal' | 'firm' | 'none'
 
 export interface Preferences {
   theme: ThemePref
   motion: MotionPref
   density: DensityPref
   surface: SurfacePref
+  elasticity: ElasticityPref
 }
 
 export const THEME_OPTIONS: { id: ThemePref; label: string }[] = [
@@ -37,10 +39,21 @@ export const SURFACE_OPTIONS: { id: SurfacePref; label: string }[] = [
   { id: 'solid', label: 'Solid' },
 ]
 
+/**
+ * How the board stretches when scrolled past its edge into the next board.
+ * `distance` scales how far you scroll to break through; `stretch` how far the board gives.
+ */
+export const ELASTICITY_OPTIONS: { id: ElasticityPref; label: string; distance: number; stretch: number }[] = [
+  { id: 'loose', label: 'Loose', distance: 0.6, stretch: 1.2 },
+  { id: 'normal', label: 'Normal', distance: 1, stretch: 1 },
+  { id: 'firm', label: 'Firm', distance: 1.6, stretch: 0.8 },
+  { id: 'none', label: 'None', distance: 0, stretch: 0 },
+]
+
 /** Kept in sync with the pre-paint script in nuxt.config.ts. */
 export const PREFS_STORAGE_KEY = 'peteyplan-prefs'
 
-const DEFAULTS: Preferences = { theme: 'system', motion: 'normal', density: 'comfortable', surface: 'glass' }
+const DEFAULTS: Preferences = { theme: 'system', motion: 'normal', density: 'comfortable', surface: 'glass', elasticity: 'normal' }
 
 function pick<T extends string>(value: unknown, options: { id: T }[], fallback: T): T {
   return options.some((option) => option.id === value) ? value as T : fallback
@@ -54,6 +67,7 @@ function readStored(): Preferences {
       motion: pick(raw.motion, MOTION_OPTIONS, DEFAULTS.motion),
       density: pick(raw.density, DENSITY_OPTIONS, DEFAULTS.density),
       surface: pick(raw.surface, SURFACE_OPTIONS, DEFAULTS.surface),
+      elasticity: pick(raw.elasticity, ELASTICITY_OPTIONS, DEFAULTS.elasticity),
     }
   } catch {
     return { ...DEFAULTS }
