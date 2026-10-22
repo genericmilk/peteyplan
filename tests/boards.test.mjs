@@ -62,8 +62,8 @@ test('boards preserve data, isolate content and transfer items safely', async (t
   const second = db.addColumn('Second', other.id)
   const card = db.addCard(source.id, 'Move me', 'Description', 'PP-123', '', 'building')
   const archived = db.addCard(source.id, 'Archived', '')
-  const release = db.addRelease({ title: 'Default release' })
-  const otherRelease = db.addRelease({ title: 'Other release' }, other.id)
+  const release = db.addRelease({ title: 'Default release', boardScope: defaultId })
+  const otherRelease = db.addRelease({ title: 'Other release', boardScope: other.id }, other.id)
 
   await t.test('isolates columns, releases, archive and complete column reordering', () => {
     assert.deepEqual(db.getBoard(empty.id), { columns: [], releases: [] })

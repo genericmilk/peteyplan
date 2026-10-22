@@ -3,8 +3,12 @@ import { cardRef, getCardRow, getRelease, resolveCardId, setCardRelease } from '
 export default defineEventHandler((event) => {
   const releaseId = getRouterParam(event, 'id')
   const cardIdParam = getRouterParam(event, 'cardId')
-  if (!getRelease(releaseId!)) {
+  const release = getRelease(releaseId!)
+  if (!release) {
     throw createError({ statusCode: 404, statusMessage: 'Release not found' })
+  }
+  if (release.done_at) {
+    throw createError({ statusCode: 409, statusMessage: 'This release is done. Reopen it to change its cards.' })
   }
 
   const cardId = resolveCardId(cardIdParam!)

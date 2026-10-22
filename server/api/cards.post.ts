@@ -1,4 +1,5 @@
 import { normalizeChecklist } from '../../shared/checklist'
+import { normalizePullRequests } from '../../shared/pullRequests'
 import { addCard, cardRef } from '../db'
 import { normalizeDueBy } from '../utils/due'
 import { normalizeJiraKey } from '../utils/jira'
@@ -16,6 +17,7 @@ export default defineEventHandler(async (event) => {
     /** UI create: mark as viewed so the unread dot is not shown */
     markViewed?: unknown
     checklist?: unknown
+    pullRequests?: unknown
   }>(event)
   const columnId = typeof body?.columnId === 'string' ? body.columnId : ''
   const title = typeof body?.title === 'string' ? body.title.trim() : ''
@@ -28,12 +30,13 @@ export default defineEventHandler(async (event) => {
     body?.progress !== undefined ? normalizeProgress(body.progress, kind) : DEFAULT_PROGRESS
   const markViewed = body?.markViewed === true
   const checklist = normalizeChecklist(body?.checklist)
+  const pullRequests = normalizePullRequests(body?.pullRequests)
 
   if (!columnId || !title) {
     throw createError({ statusCode: 400, statusMessage: 'columnId and title are required' })
   }
 
-  const card = addCard(columnId, title, description, jiraKey, dueBy, progress, kind, markViewed, checklist)
+  const card = addCard(columnId, title, description, jiraKey, dueBy, progress, kind, markViewed, checklist, pullRequests)
   if (!card) {
     throw createError({ statusCode: 404, statusMessage: 'Column not found' })
   }
@@ -51,6 +54,7 @@ export default defineEventHandler(async (event) => {
     archivedAt: card.archived_at,
     viewedAt: card.viewed_at,
     checklist: normalizeChecklist(card.checklist),
+    pullRequests: normalizePullRequests(card.pull_requests),
     columnId: card.column_id,
     position: card.position,
   }

@@ -14,6 +14,8 @@ import {
   PhDotsThreeVertical,
   PhFunnel,
   PhGear,
+  PhGitBranch,
+  PhGitPullRequest,
   PhLink,
   PhListChecks,
   PhMagnifyingGlass,
@@ -59,7 +61,10 @@ import {
   type ChecklistItem,
 } from '~/shared/checklist'
 import { accentPalette } from '~/shared/accent'
+import { PULL_REQUESTS_MAX, normalizePullRequests, parsePullRequest } from '~/shared/pullRequests'
 import type { PaletteItem } from '~/components/CommandPalette.vue'
+import ReleasesPanel, { type ReleaseCardView } from '~/components/ReleasesPanel.vue'
+import GitPanel from '~/components/GitPanel.vue'
 import {
   SHARE_HASH_KEY,
   decodeSharedCard,
@@ -88,22 +93,28 @@ interface Card {
   kind?: KindId
   progress?: ProgressId
   completedAt?: string | null
+  archivedAt?: string | null
   /** ISO datetime when opened in the UI; null/undefined = unopened (show unread dot) */
   viewedAt?: string | null
   releaseId?: string | null
   columnId?: string
   checklist?: ChecklistItem[]
+  pullRequests?: string[]
 }
 interface Column { id: string; title: string; cards: Card[] }
+interface ReleaseCard extends Card { boardId: string; columnTitle: string }
 interface Release {
   id: string
   title: string
+  /** Pinned board, or null when shared by every board */
+  boardId: string | null
+  doneAt: string | null
   weekStart: string
   preprodSchedule: string
   prodSchedule: string
   preprodKey: string
   prodKey: string
-  cards: Card[]
+  cards: ReleaseCard[]
 }
 interface Board { columns: Column[]; releases: Release[] }
 interface BoardInfo { id: string; name: string; emoji: string; color: string; isDefault: boolean }
@@ -165,6 +176,15 @@ function jiraBrowseUrl(key: string) {
 }
 
 /** Normalize a bare key or pasted browse URL to uppercase KEY, or ''. */
+/** Display labels for a card's PR links, e.g. `owner/repo#12`, plus the URLs for search. */
+function prLabels(urls: string[] | undefined): string[] {
+  return (urls ?? []).flatMap((url) => [parsePullRequest(url)?.label ?? '', url])
+}
+
+function prLink(url: string) {
+  return parsePullRequest(url) ?? { url, label: url, provider: 'other' as const, number: null }
+}
+
 function normalizeJiraKey(input: string): string {
   const trimmed = input.trim()
   if (!trimmed) return ''
@@ -411,6 +431,12 @@ const error = ref<string | null>(null)
 const searchQuery = ref('')
 const releasesOpen = ref(false)
 const releaseDropTarget = ref<string | null>(null)
+const codeOpen = ref(false)
+/** Linked folders on this board with uncommitted or unpushed work */
+const codeAttention = ref(0)
+// Only one top panel at a time, however it was opened.
+watch(releasesOpen, (open) => { if (open) codeOpen.value = false })
+watch(codeOpen, (open) => { if (open) releasesOpen.value = false })
 // Seeded from the server's list during SSR and sent in the payload, so the
 // first client render matches the server even when types are customised.
 const workTypes = useState<KindDef[]>('work-types', () => cardKinds())
@@ -433,6 +459,7 @@ function cardMatchesQuery(card: Card, q: string): boolean {
     card.progress ?? '',
     stage?.label ?? '',
     ...(card.checklist ?? []).map((item) => item.text),
+    ...prLabels(card.pullRequests),
   ]
     .join(' ')
     .toLowerCase()
@@ -637,24 +664,19 @@ function releaseTitleForCard(card: Card): string | null {
   return findRelease(card.releaseId)?.title ?? null
 }
 
-function formatWeekDay(weekStart: string, offsetDays: number): string {
-  const [y, m, d] = weekStart.split('-').map(Number)
-  if (!y || !m || !d) return weekStart
-  const date = new Date(y, m - 1, d + offsetDays)
-  return date.toLocaleDateString(undefined, {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-  })
-}
+const releasesPanel = ref<InstanceType<typeof ReleasesPanel> | null>(null)
 
 function toggleReleasesPanel() {
   releasesOpen.value = !releasesOpen.value
 }
 
-async function addRelease() {
+function toggleCodePanel() {
+  codeOpen.value = !codeOpen.value
+}
+
+async function addRelease(boardScope: string | null = null) {
   try {
-    await api('/api/releases', { method: 'POST', body: JSON.stringify({}) })
+    await api('/api/releases', { method: 'POST', body: JSON.stringify({ boardScope }) })
     await refreshBoard()
     releasesOpen.value = true
   } catch (err) { fail(err) }
@@ -665,7 +687,8 @@ async function saveRelease(
   title: string,
   weekStart: string,
   preprodKey: string,
-  prodKey: string
+  prodKey: string,
+  boardScope: string | null
 ) {
   const trimmed = title.trim()
   if (!trimmed) return
@@ -677,10 +700,32 @@ async function saveRelease(
         weekStart: weekStart.trim(),
         preprodKey: normalizeJiraKey(preprodKey),
         prodKey: normalizeJiraKey(prodKey),
+        boardScope,
       }),
     })
     await refreshBoard()
   } catch (err) { fail(err) }
+}
+
+async function setReleaseDone(releaseId: string, done: boolean, completeCards: boolean) {
+  try {
+    await api(`/api/releases/${releaseId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ done, completeCards }),
+    })
+    await refreshBoard()
+  } catch (err) { fail(err) }
+}
+
+/** Mark-done from outside the panel (command palette): open the panel and its confirm. */
+async function confirmReleaseDone(releaseId: string) {
+  releasesOpen.value = true
+  await nextTick()
+  releasesPanel.value?.confirmDone(releaseId)
+}
+
+async function openReleaseCard(card: ReleaseCardView) {
+  await goToCard({ id: card.id, boardId: card.boardId, columnId: card.columnId, archivedAt: card.archivedAt })
 }
 
 async function deleteRelease(releaseId: string) {
@@ -738,11 +783,17 @@ async function removeCardFromRelease(releaseId: string, cardId: string) {
   }
 }
 
-/** Keep release.cards in sync with column card.releaseId after optimistic edits. */
+/**
+ * Keep release.cards in sync with column card.releaseId after optimistic edits.
+ * Only this board's active cards are rebuilt; other boards' and archived cards are kept.
+ */
 function syncReleaseCardsFromBoard() {
-  const all = board.value.columns.flatMap((c) => c.cards)
+  const boardId = activeBoardId.value
+  const local = board.value.columns.flatMap((col) =>
+    col.cards.map((card): ReleaseCard => ({ ...card, boardId, columnTitle: col.title })))
   for (const rel of board.value.releases) {
-    rel.cards = all.filter((c) => c.releaseId === rel.id)
+    const kept = rel.cards.filter((c) => c.boardId !== boardId || c.archivedAt)
+    rel.cards = [...local.filter((c) => c.releaseId === rel.id), ...kept]
   }
 }
 
@@ -839,7 +890,8 @@ async function saveCard(
   dueBy: string,
   progress: ProgressId = DEFAULT_PROGRESS,
   kind: KindId = defaultKind(),
-  checklist: ChecklistItem[] = []
+  checklist: ChecklistItem[] = [],
+  pullRequests: string[] = []
 ): Promise<string | null> {
   const trimmed = title.trim()
   if (!trimmed || !findColumn(columnId)) return null
@@ -852,6 +904,7 @@ async function saveCard(
     kind: normalizedKind,
     progress: normalizeProgress(progress, normalizedKind),
     checklist: normalizeChecklist(checklist),
+    pullRequests: normalizePullRequests(pullRequests),
   }
   try {
     let savedId = cardId
@@ -1518,6 +1571,11 @@ const cardTitle = ref('')
 const cardDesc = ref('')
 const cardJiraKey = ref('')
 const cardDueBy = ref('')
+/** '' = not in a release */
+const cardReleaseId = ref('')
+const cardReleaseOriginal = ref('')
+const cardReleaseLocked = computed(() => !!findRelease(cardReleaseOriginal.value)?.doneAt)
+const cardReleaseOptions = computed(() => board.value.releases.filter((rel) => !rel.doneAt || rel.id === cardReleaseOriginal.value))
 const cardKindId = ref<KindId>(defaultKind())
 const cardProgressStage = ref<ProgressId>(DEFAULT_PROGRESS)
 const cardDeleteVisible = ref(false)
@@ -1531,6 +1589,34 @@ const cardMoveColumns = ref<{ id: string; title: string }[]>([])
 const descEditing = ref(false)
 const cardChecklist = ref<ChecklistItem[]>([])
 const checklistDraft = ref('')
+const cardPullRequests = ref<string[]>([])
+const prDraft = ref('')
+const prDraftError = ref('')
+
+/** Add the PR link being typed; returns false (with a hint) when it isn't a link. */
+function addDialogPullRequest(): boolean {
+  const text = prDraft.value.trim()
+  if (!text) return true
+  const pr = parsePullRequest(text)
+  if (!pr) {
+    prDraftError.value = 'Paste the full link, starting with https://'
+    return false
+  }
+  if (!cardPullRequests.value.includes(pr.url)) {
+    if (cardPullRequests.value.length >= PULL_REQUESTS_MAX) {
+      prDraftError.value = `A card can link up to ${PULL_REQUESTS_MAX} pull requests`
+      return false
+    }
+    cardPullRequests.value = [...cardPullRequests.value, pr.url]
+  }
+  prDraft.value = ''
+  prDraftError.value = ''
+  return true
+}
+
+function removeDialogPullRequest(url: string) {
+  cardPullRequests.value = cardPullRequests.value.filter((entry) => entry !== url)
+}
 const checklistDraftInput = ref<HTMLInputElement | null>(null)
 const checklistDragIndex = ref<number | null>(null)
 
@@ -1657,7 +1743,9 @@ function openCardDialog(columnId: string, cardId: string | null) {
     cardDesc.value = card.description || ''
     cardJiraKey.value = card.jiraKey || ''
     cardDueBy.value = card.dueBy || ''
+    cardReleaseId.value = cardReleaseOriginal.value = card.releaseId || ''
     cardChecklist.value = (card.checklist ?? []).map((item) => ({ ...item }))
+    cardPullRequests.value = [...(card.pullRequests ?? [])]
     cardKindId.value = normalizeKind(card.kind)
     cardProgressStage.value = normalizeProgress(card.progress, cardKindId.value)
     cardDeleteVisible.value = true
@@ -1670,7 +1758,9 @@ function openCardDialog(columnId: string, cardId: string | null) {
     cardDesc.value = ''
     cardJiraKey.value = ''
     cardDueBy.value = ''
+    cardReleaseId.value = cardReleaseOriginal.value = ''
     cardChecklist.value = []
+    cardPullRequests.value = []
     cardKindId.value = defaultKind()
     cardProgressStage.value = DEFAULT_PROGRESS
     cardDeleteVisible.value = false
@@ -1694,6 +1784,9 @@ function onCardDialogClose() {
   cardDueBy.value = ''
   cardChecklist.value = []
   checklistDraft.value = ''
+  cardPullRequests.value = []
+  prDraft.value = ''
+  prDraftError.value = ''
   cardKindId.value = defaultKind()
   cardProgressStage.value = DEFAULT_PROGRESS
   descEditing.value = false
@@ -1732,6 +1825,8 @@ async function moveCardFromDialog(cardId: string) {
 }
 
 async function saveCardFromDialog() {
+  // A typed-but-not-added link counts, like the checklist draft; a bad one stops the save.
+  if (!addDialogPullRequest()) return
   const savedId = await saveCard(
     cardDialogColumnId.value!,
     cardDialogCardId.value,
@@ -1741,10 +1836,19 @@ async function saveCardFromDialog() {
     cardDueBy.value,
     cardProgressStage.value,
     cardKindId.value,
-    cardChecklistWithDraft()
+    cardChecklistWithDraft(),
+    cardPullRequests.value
   )
+  const releaseId = cardReleaseId.value
   closeCardDialog()
-  if (savedId) await moveCardFromDialog(savedId)
+  if (!savedId) return
+  if (releaseId !== cardReleaseOriginal.value) {
+    try {
+      await api(`/api/cards/${savedId}`, { method: 'PATCH', body: JSON.stringify({ releaseId: releaseId || null }) })
+      await refreshBoard()
+    } catch (err) { fail(err) }
+  }
+  await moveCardFromDialog(savedId)
 }
 
 async function deleteCardFromDialog() {
@@ -1920,6 +2024,9 @@ const releaseTitle = ref('')
 const releaseWeekStart = ref('')
 const releasePreprodKey = ref('')
 const releaseProdKey = ref('')
+/** '' = shared by every board */
+const releaseScope = ref('')
+const releaseDialogDoneAt = computed(() => releaseDialogId.value ? findRelease(releaseDialogId.value)?.doneAt ?? null : null)
 
 const dialogPreprodKey = computed(() => normalizeJiraKey(releasePreprodKey.value))
 const dialogProdKey = computed(() => normalizeJiraKey(releaseProdKey.value))
@@ -1932,6 +2039,7 @@ function openReleaseDialog(releaseId: string) {
   releaseWeekStart.value = rel.weekStart
   releasePreprodKey.value = rel.preprodKey || ''
   releaseProdKey.value = rel.prodKey || ''
+  releaseScope.value = rel.boardId || ''
   nextTick(() => {
     releaseDialogEl.value?.showModal()
     releaseTitleInput.value?.focus()
@@ -1949,16 +2057,27 @@ function onReleaseDialogClose() {
   releaseWeekStart.value = ''
   releasePreprodKey.value = ''
   releaseProdKey.value = ''
+  releaseScope.value = ''
 }
 
 async function saveReleaseFromDialog() {
   if (!releaseDialogId.value) return
+  const rel = findRelease(releaseDialogId.value)
+  const scope = releaseScope.value || null
+  if (rel && scope && scope !== rel.boardId) {
+    const leaving = rel.cards.filter((card) => card.boardId !== scope).length
+    const board = boards.value.find((entry) => entry.id === scope)
+    if (leaving > 0 && !window.confirm(
+      `Only ${board?.name ?? 'that board'} can be in this release. ${leaving} card${leaving === 1 ? '' : 's'} from other boards will leave it.`
+    )) return
+  }
   await saveRelease(
     releaseDialogId.value,
     releaseTitle.value,
     releaseWeekStart.value,
     releasePreprodKey.value,
-    releaseProdKey.value
+    releaseProdKey.value,
+    scope
   )
   closeReleaseDialog()
 }
@@ -2320,7 +2439,7 @@ async function goToBoard(boardId: string) {
   return activeBoardId.value === boardId
 }
 
-async function goToCard(card: SearchIndex['cards'][number]) {
+async function goToCard(card: { id: string; boardId: string; columnId?: string; archivedAt?: string | null }) {
   if (!(await goToBoard(card.boardId))) return
   if (card.archivedAt) await openArchiveFromMenu()
   else openCardDialog(card.columnId!, card.id)
@@ -2353,6 +2472,11 @@ const paletteItems = computed<PaletteItem[]>(() => {
   action({ id: 'new-column', title: 'New column', icon: PhColumns, keywords: 'add create list', run: () => openColumnDialog(null) })
   action({ id: 'new-board', title: 'New board', icon: PhSquaresFour, keywords: 'add create', run: () => openSettings('boards') })
   action({ id: 'releases', title: releasesOpen.value ? 'Hide releases' : 'Show releases', icon: PhRocketLaunch, keywords: 'release folders deploy', run: toggleReleasesPanel })
+  action({ id: 'new-release', title: 'New release', subtitle: 'For all boards', icon: PhRocketLaunch, keywords: 'add create release deploy', run: () => addRelease(null) })
+  for (const rel of board.value.releases.filter((entry) => !entry.doneAt)) {
+    action({ id: `release-done-${rel.id}`, title: `Mark ${rel.title} done`, icon: PhCheck, keywords: 'release shipped complete finish', queryOnly: true, run: () => confirmReleaseDone(rel.id) })
+  }
+  action({ id: 'code', title: codeOpen.value ? 'Hide code changes' : 'Show code changes', icon: PhGitBranch, keywords: 'git repo commit push discard local changes folder', run: toggleCodePanel })
   action({ id: 'archive', title: 'Open archive', icon: PhArchive, keywords: 'archived restore done old', run: openArchiveFromMenu })
   action({ id: 'theme', title: resolvedTheme.value === 'dark' ? 'Switch to day mode' : 'Switch to night mode', icon: resolvedTheme.value === 'dark' ? PhSun : PhMoon, keywords: 'theme light dark day night appearance', run: toggleTheme })
   action({ id: 'settings', title: 'Settings', icon: PhGear, keywords: 'appearance theme density motion surfaces preferences', run: () => openSettings('appearance') })
@@ -2406,7 +2530,7 @@ const paletteItems = computed<PaletteItem[]>(() => {
       muted: !!card.archivedAt,
       keywords: [
         card.ref, card.jiraKey, card.description, card.columnTitle, owner?.name, kindDef(kind).label, stage,
-        ...(card.checklist ?? []).map((item) => item.text), card.archivedAt ? 'archived' : '',
+        ...(card.checklist ?? []).map((item) => item.text), ...prLabels(card.pullRequests), card.archivedAt ? 'archived' : '',
       ].filter(Boolean).join(' '),
       queryOnly: true,
       run: () => goToCard(card),
@@ -2720,6 +2844,14 @@ onBeforeUnmount(() => {
         aria-controls="releases-panel"
         @click="toggleReleasesPanel"
       ><PhRocketLaunch :size="15" aria-hidden="true" />Releases</button>
+      <button
+        class="btn btn-badged"
+        :class="{ 'btn-active': codeOpen }"
+        :aria-expanded="codeOpen"
+        aria-controls="code-panel"
+        :title="codeAttention ? codeAttention + ' linked folder' + (codeAttention === 1 ? '' : 's') + ' with changes to commit or push' : 'Linked code folders'"
+        @click="toggleCodePanel"
+      ><PhGitBranch :size="15" aria-hidden="true" />Code<span v-if="codeAttention" class="btn-badge">{{ codeAttention }}</span></button>
       <button class="btn btn-primary" :disabled="loading || !!switchingBoardId" @click="openColumnDialog(null)"><PhPlus :size="15" weight="bold" aria-hidden="true" />Column</button>
       <button
         type="button"
@@ -2747,116 +2879,34 @@ onBeforeUnmount(() => {
     <button class="btn-icon" title="Dismiss" aria-label="Dismiss error" @click="error = null"><PhX :size="15" /></button>
   </div>
 
-  <section
+  <GitPanel
+    v-if="!loading"
+    :board-id="activeBoardId"
+    :board-name="activeBoard?.name ?? 'this board'"
+    :open="codeOpen"
+    @attention="codeAttention = $event"
+  />
+
+  <ReleasesPanel
     v-if="releasesOpen && !loading"
-    id="releases-panel"
-    class="releases-panel"
-    aria-label="Release folders"
-  >
-    <div class="releases-panel-header">
-      <div>
-        <h2>Releases</h2>
-        <p class="releases-panel-hint">
-          Drag cards into a folder. Preprod update {{ PREPROD_HINT }} · Prod go-live {{ PROD_HINT }}
-        </p>
-      </div>
-      <button class="btn btn-primary" type="button" @click="addRelease"><PhPlus :size="15" weight="bold" aria-hidden="true" />New release</button>
-    </div>
-    <div class="releases-row">
-      <article
-        v-for="rel in board.releases"
-        :key="rel.id"
-        class="release-folder"
-        :class="{ 'drop-target': releaseDropTarget === rel.id }"
-        @dragover="onReleaseDragOver($event, rel.id)"
-        @dragleave="onReleaseDragLeave"
-        @drop="onReleaseDrop($event, rel.id)"
-      >
-        <div class="release-folder-header">
-          <div class="release-folder-title-row">
-            <h3 class="release-folder-title" :title="rel.title">{{ rel.title }}</h3>
-            <span class="release-folder-count">{{ rel.cards.length }}</span>
-            <button
-              type="button"
-              class="btn-icon"
-              title="Edit release"
-              aria-label="Edit release"
-              @click="openReleaseDialog(rel.id)"
-            ><PhPencilSimple :size="15" /></button>
-          </div>
-          <div class="release-schedule">
-            <div class="release-schedule-row">
-              <span class="release-env">Preprod</span>
-              <span class="release-when">{{ formatWeekDay(rel.weekStart, 0) }} · {{ rel.preprodSchedule }}</span>
-              <a
-                v-if="rel.preprodKey"
-                class="release-ticket"
-                :href="jiraBrowseUrl(rel.preprodKey)"
-                :title="'Open preprod ' + rel.preprodKey"
-                target="_blank"
-                rel="noopener noreferrer"
-                @click.stop
-              >{{ rel.preprodKey }}</a>
-              <button
-                v-else
-                type="button"
-                class="release-ticket release-ticket-missing"
-                @click="openReleaseDialog(rel.id)"
-              >Link ticket</button>
-            </div>
-            <div class="release-schedule-row">
-              <span class="release-env release-env-prod">Prod</span>
-              <span class="release-when">{{ formatWeekDay(rel.weekStart, 1) }} · {{ rel.prodSchedule }}</span>
-              <a
-                v-if="rel.prodKey"
-                class="release-ticket"
-                :href="jiraBrowseUrl(rel.prodKey)"
-                :title="'Open CM ' + rel.prodKey"
-                target="_blank"
-                rel="noopener noreferrer"
-                @click.stop
-              >{{ rel.prodKey }}</a>
-              <button
-                v-else
-                type="button"
-                class="release-ticket release-ticket-missing"
-                @click="openReleaseDialog(rel.id)"
-              >Link CM</button>
-            </div>
-          </div>
-        </div>
-        <ul class="release-cards">
-          <li
-            v-for="card in rel.cards"
-            :key="card.id"
-            class="release-card"
-          >
-            <button
-              type="button"
-              class="release-card-open"
-              @click="openCardDialog(card.columnId, card.id)"
-            >
-              <span v-if="card.ref" class="card-ref">{{ card.ref }}</span>
-              <span class="release-card-title">{{ card.title }}</span>
-            </button>
-            <button
-              type="button"
-              class="btn-icon release-card-remove"
-              title="Remove from release"
-              aria-label="Remove from release"
-              @click="removeCardFromRelease(rel.id, card.id)"
-            ><PhX :size="14" /></button>
-          </li>
-          <li v-if="rel.cards.length === 0" class="release-empty">
-            {{ dragged ? 'Drop card here' : 'Drop cards here' }}
-          </li>
-        </ul>
-      </article>
-      <div v-if="board.releases.length === 0" class="releases-empty-state">
-        No releases yet. Create one for the next Monday / Tuesday window.
-      </div>
-    </div>
-  </section>
+    ref="releasesPanel"
+    :releases="board.releases"
+    :boards="boards"
+    :active-board-id="activeBoardId"
+    :drop-target="releaseDropTarget"
+    :dragging="!!dragged"
+    :jira-url="jiraBrowseUrl"
+    :preprod-hint="PREPROD_HINT"
+    :prod-hint="PROD_HINT"
+    @create="addRelease"
+    @edit="openReleaseDialog"
+    @set-done="setReleaseDone"
+    @open-card="openReleaseCard"
+    @remove-card="removeCardFromRelease"
+    @dragover="onReleaseDragOver"
+    @dragleave="onReleaseDragLeave"
+    @drop="onReleaseDrop"
+  />
 
   <main v-if="loading" class="board-loading" aria-busy="true" aria-label="Loading board">
     <div v-for="n in 3" :key="n" class="skeleton-column" aria-hidden="true">
@@ -2939,6 +2989,21 @@ onBeforeUnmount(() => {
                 rel="noopener noreferrer"
                 @click.stop
               >{{ card.jiraKey }}</a>
+              <a
+                v-for="url in (card.pullRequests ?? []).slice(0, 2)"
+                :key="url"
+                class="card-pr"
+                :href="url"
+                :title="'Pull request ' + url"
+                target="_blank"
+                rel="noopener noreferrer"
+                @click.stop
+              ><PhGitPullRequest :size="11" weight="bold" aria-hidden="true" />{{ prLink(url).number ? '#' + prLink(url).number : 'PR' }}</a>
+              <span
+                v-if="(card.pullRequests?.length ?? 0) > 2"
+                class="card-pr card-pr-more"
+                :title="card.pullRequests!.slice(2).map((url) => prLink(url).label).join(', ')"
+              >+{{ card.pullRequests!.length - 2 }}</span>
               <button
                 v-if="card.releaseId && releaseTitleForCard(card)"
                 type="button"
@@ -3408,6 +3473,51 @@ onBeforeUnmount(() => {
               @keydown.enter.prevent="saveCardFromDialog"
             />
           </div>
+          <div class="card-dialog-jira card-dialog-prs">
+            <div class="card-dialog-field-heading">
+              <label for="card-pr-input">Pull requests</label>
+            </div>
+            <ul v-if="cardPullRequests.length" class="card-dialog-pr-list">
+              <li v-for="url in cardPullRequests" :key="url">
+                <a :href="url" target="_blank" rel="noopener noreferrer" :title="url" :data-provider="prLink(url).provider">
+                  <PhGitPullRequest :size="13" aria-hidden="true" />{{ prLink(url).label }}
+                </a>
+                <button
+                  type="button"
+                  class="btn-icon"
+                  :title="'Unlink ' + prLink(url).label"
+                  :aria-label="'Unlink ' + prLink(url).label"
+                  @click="removeDialogPullRequest(url)"
+                ><PhX :size="13" /></button>
+              </li>
+            </ul>
+            <input
+              id="card-pr-input"
+              v-model="prDraft"
+              type="url"
+              maxlength="500"
+              placeholder="Paste a PR link, press Enter"
+              autocomplete="off"
+              spellcheck="false"
+              @input="prDraftError = ''"
+              @keydown.enter.prevent="addDialogPullRequest"
+            />
+            <p v-if="prDraftError" class="card-dialog-pr-error" role="alert">{{ prDraftError }}</p>
+          </div>
+          <label>
+            Release
+            <select
+              v-model="cardReleaseId"
+              class="kind-select dialog-kind-select"
+              :disabled="cardReleaseLocked"
+              :title="cardReleaseLocked ? 'This release is done. Reopen it to change its cards.' : undefined"
+            >
+              <option value="">No release</option>
+              <option v-for="rel in cardReleaseOptions" :key="rel.id" :value="rel.id">
+                {{ rel.title }}{{ rel.doneAt ? ' (done)' : rel.boardId ? '' : ' · all boards' }}
+              </option>
+            </select>
+          </label>
           <label v-if="cardProgressStage !== 'done'">
             Due by
             <input
@@ -3619,6 +3729,17 @@ onBeforeUnmount(() => {
       </label>
       <p class="release-dialog-schedule">
         Preprod {{ PREPROD_HINT }} · Prod {{ PROD_HINT }}
+      </p>
+      <label>
+        Board
+        <select v-model="releaseScope" class="kind-select dialog-kind-select">
+          <option value="">🌐 All boards</option>
+          <option v-for="entry in boards" :key="entry.id" :value="entry.id">{{ entry.emoji }} Only {{ entry.name }}</option>
+        </select>
+      </label>
+      <p v-if="releaseDialogDoneAt" class="release-dialog-status">
+        <PhCheck :size="14" weight="bold" aria-hidden="true" />
+        Done {{ new Date(releaseDialogDoneAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) }}. Its cards are locked until it's reopened.
       </p>
       <div class="release-dialog-tickets">
         <div>

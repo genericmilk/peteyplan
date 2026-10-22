@@ -30,6 +30,12 @@ ENV HOST=0.0.0.0
 ENV PORT=3000
 ENV DATA_DIR=/data
 
+# git + ssh for the Code panel (linked project folders). Only used when you
+# mount code into the container; see docker-compose.git.yml.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git openssh-client ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /app/.output /app/.output
 
 # The built server runs as an unprivileged user and sqlite needs to write.

@@ -1,6 +1,7 @@
 import { addRelease } from '../db'
 import { normalizeJiraKey } from '../utils/jira'
 import { requestBoardId } from '../utils/board'
+import { readBoardScope } from '../utils/release'
 
 export default defineEventHandler(async (event) => {
   const body = await readBody<{
@@ -8,6 +9,7 @@ export default defineEventHandler(async (event) => {
     weekStart?: unknown
     preprodKey?: unknown
     prodKey?: unknown
+    boardScope?: unknown
   }>(event)
 
   const title = typeof body?.title === 'string' ? body.title.trim() : ''
@@ -20,10 +22,13 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'weekStart must be YYYY-MM-DD' })
   }
 
+  const boardScope = body?.boardScope === undefined ? null : readBoardScope(body.boardScope)
+
   return addRelease({
     title: title || undefined,
     weekStart: weekStart || undefined,
     preprodKey,
     prodKey,
+    boardScope,
   }, requestBoardId(event))
 })

@@ -1,4 +1,4 @@
-import { cardRef, resolveCardId, setCardRelease } from '../../../db'
+import { cardRef, cardReleaseProblem, resolveCardId, setCardRelease } from '../../../db'
 
 export default defineEventHandler(async (event) => {
   const releaseId = getRouterParam(event, 'id')
@@ -7,6 +7,11 @@ export default defineEventHandler(async (event) => {
 
   if (!cardId) {
     throw createError({ statusCode: 400, statusMessage: 'cardId is required' })
+  }
+
+  const problem = cardReleaseProblem(cardId, releaseId!)
+  if (problem) {
+    throw createError({ statusCode: problem.endsWith('not found') ? 404 : 409, statusMessage: problem })
   }
 
   const card = setCardRelease(cardId, releaseId!)

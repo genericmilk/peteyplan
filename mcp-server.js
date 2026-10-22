@@ -120,8 +120,12 @@ server.tool(
       }))
       .optional()
       .describe("To-do items inside the card (optional)"),
+    pullRequests: z
+      .array(z.string())
+      .optional()
+      .describe("Pull request URLs to link (GitHub, GitLab, Bitbucket, Azure DevOps or any http(s) link)"),
   },
-  async ({ columnId, title, description, jiraKey, dueBy, kind, progress, checklist }) => {
+  async ({ columnId, title, description, jiraKey, dueBy, kind, progress, checklist, pullRequests }) => {
     const card = await api("/api/cards", {
       method: "POST",
       body: JSON.stringify({
@@ -133,6 +137,7 @@ server.tool(
         ...(kind ? { kind } : {}),
         ...(progress ? { progress } : {}),
         checklist: checklist || [],
+        pullRequests: pullRequests || [],
       }),
     });
     return { content: [{ type: "text", text: boardText(card) }] };
@@ -141,7 +146,7 @@ server.tool(
 
 server.tool(
   "update_card",
-  "Update a card's title, description, Jira key, due date, work type, progress stage, and/or checklist. Changing dueBy re-ranks the column. cardId accepts a card ID or PP-n ref (e.g. PP-12).",
+  "Update a card's title, description, Jira key, due date, work type, progress stage, checklist and/or linked pull requests. Changing dueBy re-ranks the column. cardId accepts a card ID or PP-n ref (e.g. PP-12).",
   {
     columnId: z.string().describe("The column ID containing the card (kept for compatibility)"),
     cardId: z.string().describe("The card ID or PP-n ref to update (e.g. PP-12)"),
@@ -171,8 +176,12 @@ server.tool(
       }))
       .optional()
       .describe("Full replacement checklist (omit to keep current; pass existing item IDs to keep them; [] clears it)"),
+    pullRequests: z
+      .array(z.string())
+      .optional()
+      .describe("Full replacement list of linked pull request URLs (omit to keep current; [] clears them)"),
   },
-  async ({ cardId, title, description, jiraKey, dueBy, kind, progress, checklist }) => {
+  async ({ cardId, title, description, jiraKey, dueBy, kind, progress, checklist, pullRequests }) => {
     const body = {};
     if (title !== undefined) body.title = title;
     if (description !== undefined) body.description = description;
@@ -181,6 +190,7 @@ server.tool(
     if (kind !== undefined) body.kind = kind;
     if (progress !== undefined) body.progress = progress;
     if (checklist !== undefined) body.checklist = checklist;
+    if (pullRequests !== undefined) body.pullRequests = pullRequests;
     const card = await api(`/api/cards/${encodeURIComponent(cardId)}`, {
       method: "PATCH",
       body: JSON.stringify(body),
