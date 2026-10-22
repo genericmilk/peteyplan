@@ -29,28 +29,29 @@
 
 ---
 
-## Install with Docker
-
 You need [Docker](https://docs.docker.com/get-docker/) with Docker Compose (included in Docker Desktop).
+For local dev and tests you need [Node 24+](https://nodejs.org/) — the test suite imports TypeScript directly via type stripping, which needs Node 24 (`nvm use` picks it up from `.nvmrc`).
 
 ```bash
 git clone https://github.com/genericmilk/peteyplan.git
 cd peteyplan
+npm ci
+npm test
+cp .env.example .env   # optional: set PORT or CODE_DIR
 docker compose up -d --build
 ```
 
-Open **[http://localhost:3000](http://localhost:3000)**.
+Open **[http://localhost:3000](http://localhost:3000)** (or your `PORT`).
 
 On first start PeteyPlan creates a SQLite database in the `peteyplan-data` Docker volume and seeds a **Default Board** with **Backlog**, **To Do**, **In Progress** and **Done** columns. The container restarts automatically with Docker and has a built-in health check.
 
 <details>
 <summary><strong>Run on a different port</strong></summary>
 
-Change the left-hand side of the `ports` mapping in `docker-compose.yml`, for example to serve on 8080:
+Set `PORT` in `.env` (see `.env.example`):
 
-```yaml
-ports:
-  - "8080:3000"
+```bash
+PORT=8080 docker compose up -d
 ```
 
 Then apply it with `docker compose up -d`.
@@ -135,11 +136,11 @@ This only happens with the [git override](#git-integration) (`docker-compose.git
 Pass a proxy to the build:
 
 ```bash
-CODE_DIR=$HOME/Projects docker compose -f docker-compose.yml -f docker-compose.git.yml build --no-cache \
+docker compose -f docker-compose.yml -f docker-compose.git.yml build --no-cache \
   --build-arg HTTP_PROXY=$HTTP_PROXY \
   --build-arg HTTPS_PROXY=$HTTPS_PROXY \
   --build-arg NO_PROXY=$NO_PROXY
-CODE_DIR=$HOME/Projects docker compose -f docker-compose.yml -f docker-compose.git.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.git.yml up -d
 ```
 
 You can't use the Code panel from Docker until this build works. The plain `docker compose up -d --build` still runs PeteyPlan in the meantime.
@@ -206,21 +207,21 @@ The **Code** panel runs the `git` installed on the machine that runs the PeteyPl
 
 - **Running directly** (`npm run dev`, or `npm run build && node .output/server/index.mjs`) works out of the box: link any folder on your machine.
 - **Windows**: Git for Windows handles normal folders. Folders inside WSL (`\\wsl.localhost\<distro>\…`, listed under **WSL** in **Browse…**) run the distro's own git through `wsl.exe`, so they use your Linux git config and SSH keys.
-- **Docker** can't see your folders by default. Start it with the git override, which mounts your projects folder at the same path plus `~/.ssh`, `~/.gitconfig` and `~/.git-credentials` (read-only), and binds the app to `127.0.0.1` only:
+- **Docker** can't see your folders by default. Start it with the git override, which mounts your home directory (or `CODE_DIR` from `.env.example`) at the same path plus `~/.ssh`, `~/.gitconfig` and `~/.git-credentials` (read-only), and binds the app to `127.0.0.1` only:
 
   ```bash
-  CODE_DIR=$HOME/Projects docker compose -f docker-compose.yml -f docker-compose.git.yml up -d --build
+  docker compose -f docker-compose.yml -f docker-compose.git.yml up -d --build
   ```
 
   Only this override installs git into the image, so the plain `docker compose up` never needs the Debian package mirrors. If that build fails at `apt-get` with exit code 100, see [Troubleshooting the Docker build](#troubleshooting-the-docker-build).
 
-  HTTPS remotes use the mounted `~/.git-credentials` (your name/email come along too; host-only settings like the `gh` credential helper or a proxy are ignored). SSH remotes work with keys that have no passphrase. **Browse…** lists the mounted folder as **Code folder**.
+  HTTPS remotes use the mounted `~/.git-credentials` (your name/email come along too; host-only settings like the `gh` credential helper or a proxy are ignored). SSH remotes work with keys that have no passphrase. **Browse…** starts at your home directory.
 
   Behind an intercepting corporate proxy the plain-HTTP Debian mirrors fail. Drop the proxy's CA as `.corp-ca.pem` (gitignored, never committed) and rebuild — the image then installs git over HTTPS:
 
   ```bash
   cp /path/to/proxy-ca.pem .corp-ca.pem
-  CODE_DIR=$HOME/Projects docker compose -f docker-compose.yml -f docker-compose.git.yml up -d --build
+  docker compose -f docker-compose.yml -f docker-compose.git.yml up -d --build
   ```
 
 Commit & push, Push and Discard act on your real working copy. Anyone who can reach the app can use them, so don't expose PeteyPlan beyond your own machine while folders are linked. Unlinking a folder never touches its files.

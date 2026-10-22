@@ -1,9 +1,10 @@
 # Lets the Code panel reach your git repositories from inside Docker.
 #
-#   CODE_DIR=$HOME/Projects docker compose -f docker-compose.yml -f docker-compose.git.yml up -d --build
+#   docker compose -f docker-compose.yml -f docker-compose.git.yml up -d --build
 #
-# CODE_DIR is mounted at the same path inside the container, so folders you
-# link in PeteyPlan are the same paths you use on your machine.
+# CODE_DIR (see .env.example) is mounted at the same path inside the container,
+# so folders you link in PeteyPlan resolve to the same paths on your machine.
+# It defaults to $HOME; narrow it to a projects folder to expose less.
 services:
   peteyplan:
     build:
@@ -33,7 +34,9 @@ services:
         touch /home/node/.git-credentials.container
         exec node .output/server/index.mjs
     environment:
-      CODE_DIR: ${CODE_DIR:?Set CODE_DIR to the folder that holds your projects}
+      # Defaults to your home directory; set CODE_DIR in `.env` (see
+      # `.env.example`) to narrow it to a projects folder.
+      CODE_DIR: ${CODE_DIR:-${HOME}}
       # Mounted repos are owned by your user, not the container's; let git use them.
       GIT_CONFIG_COUNT: "1"
       GIT_CONFIG_KEY_0: safe.directory
@@ -45,7 +48,7 @@ services:
       # bundle handle credentials, proxy and TLS.
       GIT_CONFIG_GLOBAL: /home/node/.gitconfig.container
     volumes:
-      - ${CODE_DIR}:${CODE_DIR}
+      - ${CODE_DIR:-${HOME}}:${CODE_DIR:-${HOME}}
       # Read-only: name/email/signing key for commit authorship, and the
       # password store the container's git falls back to for HTTPS auth.
       - ${HOME}/.ssh:/home/node/.ssh:ro
