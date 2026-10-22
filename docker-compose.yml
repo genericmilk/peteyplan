@@ -6,10 +6,10 @@ services:
     image: peteyplan:latest
     container_name: peteyplan
     ports:
-      - "3000:3000"
+      - "${PORT:-3000}:3000"
     environment:
       NODE_ENV: production
-      PORT: 3000
+      PORT: ${PORT:-3000}
       DATA_DIR: /data
     volumes:
       # SQLite database lives here — survives rebuilds / restarts.
