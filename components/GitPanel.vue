@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { confirmDialog, requestDialogClose, vModal } from '~/composables/useModal'
 import {
   PhArrowUp,
   PhArrowsClockwise,
@@ -145,7 +146,11 @@ function refreshRepo(repo: Repo) {
 }
 
 async function unlink(repo: Repo) {
-  if (!window.confirm(`Unlink ${repo.name} from ${props.boardName}? The folder and its files stay on disk.`)) return
+  if (!(await confirmDialog({
+    title: `Unlink ${repo.name}?`,
+    message: `It's removed from ${props.boardName}. The folder and its files stay on disk.`,
+    confirmLabel: 'Unlink',
+  }))) return
   try {
     await call(`/api/repos/${repo.id}`, { method: 'DELETE' })
     repos.value = repos.value.filter((entry) => entry.id !== repo.id)
@@ -604,7 +609,7 @@ onBeforeUnmount(() => {
       </template>
     </Teleport>
 
-    <dialog ref="browseEl" class="folder-dialog" aria-labelledby="folder-dialog-title">
+    <dialog ref="browseEl" v-modal="{ sizeKey: 'folders' }" class="folder-dialog" aria-labelledby="folder-dialog-title">
       <div class="dialog-form">
         <h2 id="folder-dialog-title">Choose a project folder</h2>
         <div class="folder-browser">
@@ -662,7 +667,7 @@ onBeforeUnmount(() => {
             <template v-else>Folders with <PhGitBranch :size="13" aria-label="git" /> are repositories</template>
           </span>
           <span class="spacer"></span>
-          <button type="button" class="btn" @click="browseEl?.close()">Cancel</button>
+          <button type="button" class="btn" @click="requestDialogClose(browseEl)">Cancel</button>
           <button
             type="button"
             class="btn btn-primary"
@@ -674,7 +679,7 @@ onBeforeUnmount(() => {
       </div>
     </dialog>
 
-    <dialog ref="discardEl" class="release-dialog code-discard-dialog" aria-labelledby="code-discard-title" @close="discardId = null">
+    <dialog ref="discardEl" v-modal class="release-dialog code-discard-dialog" aria-labelledby="code-discard-title" @close="discardId = null">
       <form v-if="discardRepo" method="dialog" class="dialog-form" @submit.prevent="submitDiscard">
         <h2 id="code-discard-title">Discard changes in {{ discardRepo.name }}?</h2>
         <p class="release-dialog-schedule">
@@ -700,7 +705,7 @@ onBeforeUnmount(() => {
         </template>
         <div class="dialog-actions">
           <span class="spacer"></span>
-          <button type="button" class="btn" @click="discardEl?.close()">Cancel</button>
+          <button type="button" class="btn" @click="requestDialogClose(discardEl)">Cancel</button>
           <button
             type="submit"
             class="btn btn-danger"

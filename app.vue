@@ -65,6 +65,9 @@ import { PULL_REQUESTS_MAX, normalizePullRequests, parsePullRequest } from '~/sh
 import type { PaletteItem } from '~/components/CommandPalette.vue'
 import ReleasesPanel, { type ReleaseCardView } from '~/components/ReleasesPanel.vue'
 import GitPanel from '~/components/GitPanel.vue'
+import ConfirmDialog from '~/components/ConfirmDialog.vue'
+import { confirmDialog, requestDialogClose, resetDialogSizes, vModal } from '~/composables/useModal'
+import { fireConfetti } from '~/composables/useConfetti'
 import {
   SHARE_HASH_KEY,
   decodeSharedCard,
@@ -732,11 +735,12 @@ async function deleteRelease(releaseId: string) {
   const rel = findRelease(releaseId)
   if (!rel) return
   const count = rel.cards.length
-  const message =
-    count > 0
-      ? `Delete "${rel.title}"? Its ${count} card${count === 1 ? '' : 's'} will stay on the board but leave this release.`
-      : `Delete "${rel.title}"?`
-  if (!window.confirm(message)) return
+  if (!(await confirmDialog({
+    title: `Delete "${rel.title}"?`,
+    message: count > 0 ? `Its ${count} card${count === 1 ? '' : 's'} will stay on the board but leave this release.` : '',
+    confirmLabel: 'Delete release',
+    tone: 'danger',
+  }))) return
   try {
     await api(`/api/releases/${releaseId}`, { method: 'DELETE' })
     await refreshBoard()
@@ -847,11 +851,12 @@ async function deleteColumn(columnId: string) {
   const col = findColumn(columnId)
   if (!col) return
   const count = col.cards.length
-  const message =
-    count > 0
-      ? `Delete "${col.title}"? Its ${count} card${count === 1 ? '' : 's'} will be removed.`
-      : `Delete "${col.title}"?`
-  if (!window.confirm(message)) return
+  if (!(await confirmDialog({
+    title: `Delete "${col.title}"?`,
+    message: count > 0 ? `Its ${count} card${count === 1 ? '' : 's'} will be removed.` : '',
+    confirmLabel: 'Delete column',
+    tone: 'danger',
+  }))) return
   try {
     await api(`/api/columns/${columnId}`, { method: 'DELETE' })
     await refreshBoard()
@@ -863,8 +868,11 @@ async function clearColumnCards(columnId: string) {
   if (!col) return
   const count = col.cards.length
   if (count === 0) return
-  const message = `Archive all ${count} card${count === 1 ? '' : 's'} in "${col.title}"? You can restore them from Archive.`
-  if (!window.confirm(message)) return
+  if (!(await confirmDialog({
+    title: `Archive all ${count} card${count === 1 ? '' : 's'} in "${col.title}"?`,
+    message: 'You can restore them from Archive.',
+    confirmLabel: 'Archive cards',
+  }))) return
   try {
     await api(`/api/columns/${columnId}/cards`, { method: 'DELETE' })
     await refreshBoard()
@@ -1191,7 +1199,7 @@ function quickCardToDialog() {
 }
 
 async function deleteCard(cardId: string) {
-  if (!window.confirm('Archive this card? You can restore it from Archive.')) return
+  if (!(await confirmDialog({ title: 'Archive this card?', message: 'You can restore it from Archive.', confirmLabel: 'Archive' }))) return
   try {
     await api(`/api/cards/${cardId}`, { method: 'DELETE' })
     await refreshBoard()
@@ -1428,7 +1436,7 @@ function onColumnDrop(event: DragEvent, column: Column) {
     return
   }
   if (d && indicator && indicator.columnId === column.id) {
-    moveCard(d.cardId, column.id, indicator.index)
+    moveCard(d.cardId, column.id, indicator.index, { x: event.clientX, y: event.clientY })
   }
   finishDrag()
 }
@@ -1505,7 +1513,8 @@ function onBoardDrop(event: DragEvent) {
   finishDrag()
 }
 
-async function moveCard(cardId: string, toColumnId: string, index: number) {
+/** `dropPoint` is where the card was released, for the Done celebration. */
+async function moveCard(cardId: string, toColumnId: string, index: number, dropPoint?: { x: number; y: number }) {
   // Optimistic local reorder for instant feedback.
   let fromIndex = -1
   const fromCol = board.value.columns.find((col) => {
@@ -1525,6 +1534,7 @@ async function moveCard(cardId: string, toColumnId: string, index: number) {
   if (isDoneColumn(toCol) && cardProgress(moved) !== 'done') {
     moved.progress = 'done'
     moved.completedAt = new Date().toISOString()
+    if (dropPoint) fireConfetti(dropPoint.x, dropPoint.y, { motion: motionFactor.value, accent: activeBoard.value?.color })
   }
 
   // Persist the full new ordering of the destination column, then refresh
@@ -1728,6 +1738,19 @@ async function markCardViewed(card: Card) {
   }
 }
 
+/** What the card dialog showed when it opened, to tell whether anything was edited. */
+let cardDialogSnapshot = ''
+function cardDialogState(): string {
+  return JSON.stringify([
+    cardTitle.value.trim(), cardDesc.value.trim(), cardJiraKey.value.trim(), cardDueBy.value, cardKindId.value,
+    cardProgressStage.value, cardReleaseId.value, cardMoveBoardId.value, cardMoveColumnId.value,
+    cardChecklist.value.map(({ text, done }) => [text.trim(), !!done]), cardPullRequests.value,
+  ])
+}
+function cardDialogDirty(): boolean {
+  return cardDialogState() !== cardDialogSnapshot || !!checklistDraft.value.trim() || !!prDraft.value.trim()
+}
+
 function openCardDialog(columnId: string, cardId: string | null) {
   cardDialogColumnId.value = columnId
   cardDialogCardId.value = cardId
@@ -1766,6 +1789,7 @@ function openCardDialog(columnId: string, cardId: string | null) {
     cardDeleteVisible.value = false
     descEditing.value = true
   }
+  cardDialogSnapshot = cardDialogState()
   nextTick(() => {
     cardDialogEl.value?.showModal()
     cardTitleInput.value?.focus()
@@ -2040,11 +2064,17 @@ function openReleaseDialog(releaseId: string) {
   releasePreprodKey.value = rel.preprodKey || ''
   releaseProdKey.value = rel.prodKey || ''
   releaseScope.value = rel.boardId || ''
+  releaseDialogSnapshot = releaseDialogState()
   nextTick(() => {
     releaseDialogEl.value?.showModal()
     releaseTitleInput.value?.focus()
     releaseTitleInput.value?.select()
   })
+}
+
+let releaseDialogSnapshot = ''
+function releaseDialogState(): string {
+  return JSON.stringify([releaseTitle.value.trim(), releaseWeekStart.value, normalizeJiraKey(releasePreprodKey.value), normalizeJiraKey(releaseProdKey.value), releaseScope.value])
 }
 
 function closeReleaseDialog() {
@@ -2067,9 +2097,11 @@ async function saveReleaseFromDialog() {
   if (rel && scope && scope !== rel.boardId) {
     const leaving = rel.cards.filter((card) => card.boardId !== scope).length
     const board = boards.value.find((entry) => entry.id === scope)
-    if (leaving > 0 && !window.confirm(
-      `Only ${board?.name ?? 'that board'} can be in this release. ${leaving} card${leaving === 1 ? '' : 's'} from other boards will leave it.`
-    )) return
+    if (leaving > 0 && !(await confirmDialog({
+      title: `Only ${board?.name ?? 'that board'}?`,
+      message: `${leaving} card${leaving === 1 ? '' : 's'} from other boards will leave this release.`,
+      confirmLabel: 'Change board',
+    }))) return
   }
   await saveRelease(
     releaseDialogId.value,
@@ -2104,12 +2136,15 @@ function openColumnDialog(columnId: string | null, heading?: string) {
   columnDialogColumnId.value = col?.id ?? null
   columnDialogTitle.value = heading ?? (col ? 'Rename column' : 'New column')
   columnTitle.value = col?.title ?? ''
+  columnDialogSnapshot = columnTitle.value.trim()
   nextTick(() => {
     columnDialogEl.value?.showModal()
     columnTitleInput.value?.focus()
     columnTitleInput.value?.select()
   })
 }
+
+let columnDialogSnapshot = ''
 
 function closeColumnDialog() {
   columnDialogEl.value?.close()
@@ -2210,6 +2245,16 @@ const newBoard = ref({ name: '', emoji: '📋', color: '#5b8cff' })
 const settingsBusy = ref(false)
 const settingsTab = ref<'appearance' | 'boards' | 'types'>('appearance')
 
+const dialogSizesReset = ref(false)
+function onResetDialogSizes() {
+  resetDialogSizes()
+  // The open Settings dialog drops its own remembered size too.
+  settingsDialogEl.value?.style.removeProperty('width')
+  settingsDialogEl.value?.style.removeProperty('height')
+  dialogSizesReset.value = true
+  setTimeout(() => { dialogSizesReset.value = false }, 1600)
+}
+
 function openSettings(tab: 'appearance' | 'boards' | 'types' = 'appearance') {
   closeBoardMenu()
   settingsTab.value = tab
@@ -2244,6 +2289,15 @@ function resetKindDrafts() {
   kindDrafts.value = kindDraftsFrom(workTypes.value)
 }
 
+/** Unsaved edits anywhere in Settings: work types, board rows or a half-made board. */
+function settingsDirty(): boolean {
+  const boardChanged = boardDrafts.value.some((draft) => {
+    const saved = boards.value.find((entry) => entry.id === draft.id)
+    return !!saved && (draft.name.trim() !== saved.name || draft.emoji !== saved.emoji || draft.color !== saved.color)
+  })
+  return kindDraftsDirty.value || boardChanged || !!newBoard.value.name.trim()
+}
+
 const kindDraftsDirty = computed(() =>
   JSON.stringify(kindDraftsPayload(kindDrafts.value)) !== JSON.stringify(kindDraftsPayload(kindDraftsFrom(workTypes.value)))
 )
@@ -2262,13 +2316,19 @@ function addKindDraft() {
   })
 }
 
-function removeKindDraft(index: number) {
+async function removeKindDraft(index: number) {
   const kind = kindDrafts.value[index]
   const fallback = kindDrafts.value.find((_, i) => i !== index)
   if (!fallback) return
   const name = kind.label.trim() || 'this work type'
-  if (kind.id && !window.confirm(`Remove "${name}"? Its cards become "${fallback.label.trim() || 'the first type'}" when you save.`)) return
-  kindDrafts.value.splice(index, 1)
+  if (kind.id && !(await confirmDialog({
+    title: `Remove "${name}"?`,
+    message: `Its cards become "${fallback.label.trim() || 'the first type'}" when you save.`,
+    confirmLabel: 'Remove',
+    tone: 'danger',
+  }))) return
+  const at = kindDrafts.value.indexOf(kind)
+  if (at !== -1) kindDrafts.value.splice(at, 1)
 }
 
 function addStageDraft(kind: KindDraft) {
@@ -2313,7 +2373,12 @@ async function saveBoardSettings(draft: { name: string; emoji: string; color: st
 }
 
 async function removeBoard(entry: BoardInfo) {
-  if (entry.isDefault || !window.confirm(`Delete "${entry.name}" and all its columns, cards, archived cards, and releases? This cannot be undone.`)) return
+  if (entry.isDefault || !(await confirmDialog({
+    title: `Delete "${entry.name}"?`,
+    message: 'All its columns, cards, archived cards and pinned releases go too. This cannot be undone.',
+    confirmLabel: 'Delete board',
+    tone: 'danger',
+  }))) return
   settingsBusy.value = true
   try {
     await api(`/api/boards/${entry.id}`, { method: 'DELETE' })
@@ -2388,7 +2453,7 @@ async function restoreArchivedCard(cardId: string) {
 }
 
 async function permanentlyDeleteArchivedCard(cardId: string) {
-  if (!window.confirm('Permanently delete this card? This cannot be undone.')) return
+  if (!(await confirmDialog({ title: 'Permanently delete this card?', message: 'This cannot be undone.', confirmLabel: 'Delete', tone: 'danger' }))) return
   try {
     await api(`/api/archive/${cardId}`, { method: 'DELETE' })
     await loadArchive()
@@ -3199,7 +3264,12 @@ onBeforeUnmount(() => {
   </div>
   </div>
 
-  <dialog ref="settingsDialogEl" class="settings-dialog" aria-labelledby="board-settings-title" @cancel="settingsBusy && $event.preventDefault()">
+  <dialog
+    ref="settingsDialogEl"
+    v-modal="{ sizeKey: 'settings', isDirty: settingsDirty, canDismiss: () => !settingsBusy }"
+    class="settings-dialog"
+    aria-labelledby="board-settings-title"
+  >
     <div class="dialog-form">
       <h2 id="board-settings-title">Settings</h2>
       <div class="settings-tabs" role="tablist" aria-label="Settings sections">
@@ -3323,6 +3393,13 @@ onBeforeUnmount(() => {
             >{{ option.label }}</button>
           </div>
         </div>
+        <div class="setting-row">
+          <div class="setting-label">
+            <h3>Dialog sizes</h3>
+            <p>Drag a dialog's bottom-right corner to resize it. Each one remembers its size.</p>
+          </div>
+          <button type="button" class="btn" @click="onResetDialogSizes">{{ dialogSizesReset ? 'Sizes reset' : 'Reset sizes' }}</button>
+        </div>
         <p class="settings-hint">Appearance is saved in this browser. Press <kbd>{{ paletteShortcut }}</kbd> anywhere to search cards, boards and actions.</p>
       </section>
 
@@ -3410,15 +3487,16 @@ onBeforeUnmount(() => {
       </section>
       <div class="dialog-actions">
         <span class="spacer"></span>
-        <button class="btn" :disabled="settingsBusy" @click="settingsDialogEl?.close()">Close</button>
+        <button class="btn" :disabled="settingsBusy" @click="requestDialogClose(settingsDialogEl)">Close</button>
       </div>
     </div>
   </dialog>
 
   <CommandPalette v-model:open="paletteOpen" v-model:query="paletteQuery" :items="paletteItems" :loading="paletteLoading" />
+  <ConfirmDialog />
 
   <!-- Card dialog -->
-  <dialog ref="cardDialogEl" class="card-dialog" @close="onCardDialogClose">
+  <dialog ref="cardDialogEl" v-modal="{ sizeKey: 'card', isDirty: cardDialogDirty }" class="card-dialog" @close="onCardDialogClose">
     <form method="dialog" class="dialog-form card-dialog-form" @submit.prevent="saveCardFromDialog">
       <h2>{{ cardDialogTitle }}<span v-if="cardDialogRef" class="card-dialog-ref">{{ cardDialogRef }}</span></h2>
       <label class="card-dialog-title">
@@ -3665,14 +3743,14 @@ onBeforeUnmount(() => {
           <span aria-live="polite">{{ shareLinkCopied ? 'Link copied' : 'Copy link' }}</span>
         </button>
         <span class="spacer"></span>
-        <button type="button" class="btn" @click="closeCardDialog">Cancel</button>
+        <button type="button" class="btn" @click="requestDialogClose(cardDialogEl)">Cancel</button>
         <button type="button" class="btn btn-primary" @click="saveCardFromDialog">Save</button>
       </div>
     </form>
   </dialog>
 
   <!-- Shared card dialog -->
-  <dialog ref="shareDialogEl" class="share-dialog" aria-labelledby="share-dialog-title" @close="onShareDialogClose">
+  <dialog ref="shareDialogEl" v-modal="{ canDismiss: () => !shareBusy }" class="share-dialog" aria-labelledby="share-dialog-title" @close="onShareDialogClose">
     <form v-if="sharedCard" method="dialog" class="dialog-form" @submit.prevent="addSharedCard">
       <h2 id="share-dialog-title">Shared card<span v-if="sharedCard.ref" class="card-dialog-ref">{{ sharedCard.ref }}</span></h2>
       <div class="share-preview">
@@ -3696,14 +3774,14 @@ onBeforeUnmount(() => {
       </div>
       <div class="dialog-actions">
         <span class="spacer"></span>
-        <button type="button" class="btn" @click="closeShareDialog">Cancel</button>
+        <button type="button" class="btn" @click="requestDialogClose(shareDialogEl)">Cancel</button>
         <button type="submit" class="btn btn-primary" autofocus :disabled="!shareColumnId || shareBusy">Add to board</button>
       </div>
     </form>
   </dialog>
 
   <!-- Release dialog -->
-  <dialog ref="releaseDialogEl" class="release-dialog" @close="onReleaseDialogClose">
+  <dialog ref="releaseDialogEl" v-modal="{ sizeKey: 'release', isDirty: () => releaseDialogState() !== releaseDialogSnapshot }" class="release-dialog" @close="onReleaseDialogClose">
     <form method="dialog" class="dialog-form" @submit.prevent="saveReleaseFromDialog">
       <h2>Edit release</h2>
       <label>
@@ -3788,14 +3866,14 @@ onBeforeUnmount(() => {
       <div class="dialog-actions">
         <button type="button" class="btn btn-danger" @click="deleteReleaseFromDialog">Delete</button>
         <span class="spacer"></span>
-        <button type="button" class="btn" @click="closeReleaseDialog">Cancel</button>
+        <button type="button" class="btn" @click="requestDialogClose(releaseDialogEl)">Cancel</button>
         <button type="button" class="btn btn-primary" @click="saveReleaseFromDialog">Save</button>
       </div>
     </form>
   </dialog>
 
   <!-- Column dialog -->
-  <dialog ref="columnDialogEl" class="column-dialog" @close="onColumnDialogClose">
+  <dialog ref="columnDialogEl" v-modal="{ isDirty: () => columnTitle.trim() !== columnDialogSnapshot }" class="column-dialog" @close="onColumnDialogClose">
     <form method="dialog" class="dialog-form" @submit.prevent="saveColumnFromDialog">
       <h2>{{ columnDialogTitle }}</h2>
       <label>
@@ -3812,7 +3890,7 @@ onBeforeUnmount(() => {
       </label>
       <div class="dialog-actions">
         <span class="spacer"></span>
-        <button type="button" class="btn" @click="closeColumnDialog">Cancel</button>
+        <button type="button" class="btn" @click="requestDialogClose(columnDialogEl)">Cancel</button>
         <button type="button" class="btn btn-primary" @click="saveColumnFromDialog">Save</button>
       </div>
     </form>
@@ -3850,7 +3928,7 @@ onBeforeUnmount(() => {
   </div>
 
   <!-- Archive screen -->
-  <dialog ref="archiveDialogEl" class="archive-dialog" @close="archivedCards = []">
+  <dialog ref="archiveDialogEl" v-modal="{ sizeKey: 'archive' }" class="archive-dialog" @close="archivedCards = []">
     <div class="dialog-form archive-dialog-form">
       <div class="archive-dialog-header">
         <h2>Archive</h2>

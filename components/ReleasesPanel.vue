@@ -12,6 +12,7 @@ import {
   PhX,
 } from '@phosphor-icons/vue'
 import { kindDef, normalizeKind, normalizeProgress } from '~/shared/progress'
+import { requestDialogClose, vModal } from '~/composables/useModal'
 
 export interface ReleaseCardView {
   id: string
@@ -376,7 +377,7 @@ defineExpose({ confirmDone, showTab: (next: 'open' | 'done') => { tab.value = ne
       </div>
     </div>
 
-    <dialog ref="confirmEl" class="release-dialog" aria-labelledby="release-done-title" @close="confirmId = null">
+    <dialog ref="confirmEl" v-modal class="release-dialog" aria-labelledby="release-done-title" @close="confirmId = null">
       <form v-if="confirmRelease" method="dialog" class="dialog-form" @submit.prevent="submitDone">
         <h2 id="release-done-title">Mark “{{ confirmRelease.title }}” done?</h2>
         <p class="release-dialog-schedule">
@@ -388,7 +389,7 @@ defineExpose({ confirmDone, showTab: (next: 'open' | 'done') => { tab.value = ne
         </label>
         <div class="dialog-actions">
           <span class="spacer"></span>
-          <button type="button" class="btn" @click="confirmEl?.close()">Cancel</button>
+          <button type="button" class="btn" @click="requestDialogClose(confirmEl)">Cancel</button>
           <button type="submit" class="btn btn-primary"><PhCheck :size="15" weight="bold" aria-hidden="true" />Mark done</button>
         </div>
       </form>
