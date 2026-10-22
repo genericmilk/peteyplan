@@ -30,11 +30,15 @@ ENV HOST=0.0.0.0
 ENV PORT=3000
 ENV DATA_DIR=/data
 
-# git + ssh for the Code panel (linked project folders). Only used when you
-# mount code into the container; see docker-compose.git.yml.
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends git openssh-client ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
+# git + ssh for the Code panel (linked project folders). Off by default so the
+# plain image never needs the Debian mirrors; docker-compose.git.yml turns it on.
+# Behind a proxy, pass HTTP_PROXY/HTTPS_PROXY as build args.
+ARG WITH_GIT=false
+RUN if [ "$WITH_GIT" = "true" ]; then \
+    apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends git openssh-client ca-certificates \
+    && rm -rf /var/lib/apt/lists/*; \
+  fi
 
 COPY --from=build /app/.output /app/.output
 

@@ -149,6 +149,8 @@ The **Code** panel runs the `git` installed on the machine that runs the PeteyPl
   CODE_DIR=$HOME/Projects docker compose -f docker-compose.yml -f docker-compose.git.yml up -d --build
   ```
 
+  Only this override installs git into the image, so the plain `docker compose up` never needs the Debian package mirrors. If the git build fails at `apt-get` (exit code 100) behind a corporate proxy, pass it through: `docker compose -f docker-compose.yml -f docker-compose.git.yml build --build-arg HTTP_PROXY=$HTTP_PROXY --build-arg HTTPS_PROXY=$HTTPS_PROXY`.
+
   SSH remotes work with keys that have no passphrase. HTTPS remotes need a credential helper that works inside Linux, so the macOS Keychain helper won't. **Browse…** lists the mounted folder as **Code folder**.
 
 Commit & push, Push and Discard act on your real working copy. Anyone who can reach the app can use them, so don't expose PeteyPlan beyond your own machine while folders are linked. Unlinking a folder never touches its files.
