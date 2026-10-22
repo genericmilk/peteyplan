@@ -2967,3 +2967,72 @@ dialog.command-palette[open] { display: flex; }
   0%, 30% { box-shadow: 0 0 0 2px var(--accent), 0 0 0 8px color-mix(in srgb, var(--accent) 25%, transparent); }
   100% { box-shadow: 0 0 0 2px transparent; }
 }
+
+/* ── Modals ─────────────────────────────────────────────────────────────── */
+
+/* The dialog is a fixed box; its form scrolls and the action bar stays pinned
+   to the bottom on its own surface, so nothing shows through behind it. */
+dialog:not(.command-palette) {
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  overflow: hidden;
+}
+dialog:not(.command-palette)[open] { display: flex; flex-direction: column; }
+dialog:not(.command-palette) > form,
+dialog:not(.command-palette) > .dialog-form {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: 0;
+}
+.dialog-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  flex-wrap: wrap;
+  margin: 8px -24px 0;
+  padding: 12px 24px 16px;
+  /* Opaque on purpose: the glass surface lets scrolled content show through. */
+  background: var(--bg-elev);
+}
+
+/* Drag the bottom-right corner to resize; v-modal remembers the size. */
+dialog.dialog-resizable {
+  resize: both;
+  min-width: min(360px, calc(100vw - 32px));
+  min-height: 220px;
+}
+/* Content grows into a taller dialog instead of being capped. */
+dialog.card-dialog .card-dialog-grid { flex: 1 0 auto; }
+dialog.folder-dialog > .dialog-form { display: flex; flex-direction: column; }
+dialog.folder-dialog .folder-browser { height: auto; flex: 1 1 min(56vh, 440px); min-height: 240px; }
+
+/* Confirm */
+dialog.confirm-dialog { width: min(420px, calc(100vw - 32px)); }
+.confirm-dialog-body { display: flex; gap: 14px; align-items: flex-start; }
+.confirm-dialog-body h2 { margin: 0 0 6px; }
+.confirm-dialog-message { margin: 0 0 8px; font-size: 13px; line-height: 1.5; color: var(--text-muted); }
+.confirm-dialog-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+.btn.btn-danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn.btn-danger-solid:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 85%, #000); }
+
+.confetti-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 9999;
+}
