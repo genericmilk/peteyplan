@@ -9,7 +9,7 @@
 
 <p align="center">
   A fast, self-hosted Kanban board for tracking your own work.<br>
-  Multiple boards, checklists, release folders and an MCP server, in one small Docker container.
+  Multiple boards, checklists, release folders, a local git panel and an MCP server, in one small Docker container.
 </p>
 
 <p align="center">
@@ -120,9 +120,11 @@ Return to the latest version with `git checkout main && git pull`.
 - Every card gets a stable reference like `PP-12` that works in the UI, API and MCP tools.
 - **Copy link** in a card's dialog puts a share link on your clipboard to send over chat. The card itself is packed into the link (after the `#`, so it never reaches a server), and opening it in anyone's PeteyPlan offers to add a copy to their chosen board and column. Links point at your own address (usually `localhost:3000`), so someone running on a different port has to change that part.
 - Optional description (Markdown), Jira key and due date. Sooner due dates float to the top; overdue and due-today dates are highlighted.
+- **Pull requests**: paste PR links into a card's dialog (GitHub, GitLab, Bitbucket, Azure DevOps or any link). They show as `#123` chips on the card that open the PR, and as a count on the card's row in its release. Search finds cards by PR number or repo.
 - **Checklists** inside cards: tick items on the card, quick-add from the card footer, or edit and reorder them in the card dialog.
 - Work types with their own progress stages, shown as a stage track. Hover a segment to see the stage, click to set it. Development task, Chore and Managing someone come built in. Rename, reorder, add or remove types and their stages under **Settings → Work types**. Every type runs from Todo to Done; cards on a removed stage step back to the one before it, and cards of a removed type move to the first type.
-- **Release folders** group cards into a weekly release with preprod and prod Jira tickets.
+- **Releases** group cards into a weekly release with preprod and prod Jira tickets. A release is shared by every board by default, so it can collect cards from all of them, or it can be pinned to one board. Drag cards onto a folder or pick one with the **Release** selector in the card dialog. Each folder shows its progress, flags **Past due** once prod go-live has passed, and keeps cards even after they archive. **Mark done** moves it to the **Done** tab and locks its cards, and can optionally mark every unfinished card Done too. **Reopen** brings it back.
+- **Code**: link one or more local project folders to a board, then see its branch, pending changes and unpushed commits from the top bar. Click the branch to switch, check out a remote branch, create a new one, or fetch. Pick folders with **Browse…** (on Windows this lists your drives and WSL distros). **Commit & push** stages everything and pushes in one click, and **Discard…** throws away local edits, with a checkbox for also deleting new untracked files. See [Git integration](#git-integration).
 - Soft-delete to an archive you can restore from. An unread dot marks cards nobody has opened yet.
 
 **Built for speed**
@@ -135,6 +137,22 @@ Return to the latest version with `git checkout main && git pull`.
 - Switching boards is a quick slide that takes about 100ms however many boards it passes.
 - **Settings → Appearance**: Day, Night or System theme (or the sun/moon button), Glass or Solid surfaces, transition speed, and comfortable or compact density. Respects your OS reduced-motion and reduced-transparency settings.
 
+## Git integration
+
+The **Code** panel runs the `git` installed on the machine that runs the PeteyPlan server. It uses your own git config and credentials, never prompts, and only touches folders you've linked.
+
+- **Running directly** (`npm run dev`, or `npm run build && node .output/server/index.mjs`) works out of the box: link any folder on your machine.
+- **Windows**: Git for Windows handles normal folders. Folders inside WSL (`\\wsl.localhost\<distro>\…`, listed under **WSL** in **Browse…**) run the distro's own git through `wsl.exe`, so they use your Linux git config and SSH keys.
+- **Docker** can't see your folders by default. Start it with the git override, which mounts your projects folder at the same path plus `~/.ssh` and `~/.gitconfig` (read-only), and binds the app to `127.0.0.1` only:
+
+  ```bash
+  CODE_DIR=$HOME/Projects docker compose -f docker-compose.yml -f docker-compose.git.yml up -d --build
+  ```
+
+  SSH remotes work with keys that have no passphrase. HTTPS remotes need a credential helper that works inside Linux, so the macOS Keychain helper won't. **Browse…** lists the mounted folder as **Code folder**.
+
+Commit & push, Push and Discard act on your real working copy. Anyone who can reach the app can use them, so don't expose PeteyPlan beyond your own machine while folders are linked. Unlinking a folder never touches its files.
+
 ## MCP server
 
 [`mcp-server.js`](mcp-server.js) lets AI agents read and update your board. It runs over stdio and talks to the running app over HTTP, so start PeteyPlan first.
@@ -145,7 +163,7 @@ Return to the latest version with `git checkout main && git pull`.
 | Cards | `add_card`, `update_card`, `delete_card`, `move_card` |
 | Columns | `add_column`, `rename_column`, `delete_column`, `clear_column_cards`, `reorder_columns` |
 
-Board reads, `move_card`, `add_column` and `reorder_columns` take an optional `boardId` (omit it for the default board). `add_card` and `update_card` accept a `checklist`, and take `kind` and `progress` as an id or name from `get_work_types`. Set `PETEYPLAN_API_URL` if the app isn't at `http://localhost:3000`.
+Board reads, `move_card`, `add_column` and `reorder_columns` take an optional `boardId` (omit it for the default board). `add_card` and `update_card` accept a `checklist` and `pullRequests` (URLs), and take `kind` and `progress` as an id or name from `get_work_types`. Set `PETEYPLAN_API_URL` if the app isn't at `http://localhost:3000`.
 
 <details>
 <summary><strong>OpenCode</strong></summary>
@@ -195,23 +213,35 @@ Card routes accept either a card ID or a `PP-n` ref. Routes marked † take an o
 | GET | `/api/search` | Every column and card on every board, archived cards included (powers the command palette) |
 | GET | `/api/kinds` | Work types and their stages |
 | PUT | `/api/kinds` | `{ kinds: [{ id?, label, stages: [{ id?, label }] }] }`, replacing the whole list. `stages` are the ones between Todo and Done |
-| POST | `/api/cards` | `{ columnId, title, description?, jiraKey?, dueBy?, kind?, progress?, checklist? }` |
-| PATCH | `/api/cards/:id` | `{ title?, description?, jiraKey?, dueBy?, kind?, progress?, checklist? }` |
+| POST | `/api/cards` | `{ columnId, title, description?, jiraKey?, dueBy?, kind?, progress?, checklist?, pullRequests? }` |
+| PATCH | `/api/cards/:id` | `{ title?, description?, jiraKey?, dueBy?, kind?, progress?, checklist?, pullRequests?, releaseId? }` |
 | DELETE | `/api/cards/:id` | Soft-archives the card |
 | POST | `/api/cards/reorder` | `{ columnId, orderedIds }` |
 | GET | `/api/archive` † | |
 | POST | `/api/archive/restore` | `{ cardId, columnId? }` |
 | DELETE | `/api/archive/:id` | Permanently deletes an archived card |
-| GET | `/api/releases` † | |
-| POST | `/api/releases` † | `{ title?, weekStart?, preprodKey?, prodKey? }` |
-| PATCH | `/api/releases/:id` | `{ title?, weekStart?, preprodKey?, prodKey? }` |
+| GET | `/api/releases` † | Shared releases plus those pinned to the board; open first, then done |
+| POST | `/api/releases` † | `{ title?, weekStart?, preprodKey?, prodKey?, boardScope? }`. `boardScope` is a board ID, or `null` (default) for every board |
+| PATCH | `/api/releases/:id` | `{ title?, weekStart?, preprodKey?, prodKey?, boardScope?, done?, completeCards? }`. Pinning to a board drops cards from other boards |
 | DELETE | `/api/releases/:id` | Cards stay on the board |
-| POST | `/api/releases/:id/cards` | `{ cardId }` |
+| POST | `/api/releases/:id/cards` | `{ cardId }`. 409 when the release is done or pinned to another board |
 | DELETE | `/api/releases/:id/cards/:cardId` | |
+| GET | `/api/git` | `{ available, version }` |
+| GET | `/api/folders?path=` | Subfolders of `path` (default: home), flagging git repos, plus places to start from (home, drives, WSL distros) |
+| GET | `/api/boards/:id/repos` | Linked folders with branch, ahead/behind and changed files |
+| POST | `/api/boards/:id/repos` | `{ path }`, an absolute path inside a git repository |
+| DELETE | `/api/repos/:id` | Unlinks the folder (files stay on disk) |
+| GET | `/api/repos/:id/status` | |
+| POST | `/api/repos/:id/commit` | `{ message, push? }`. Stages everything first |
+| POST | `/api/repos/:id/push` | Sets an upstream on the first push |
+| POST | `/api/repos/:id/discard` | `{ includeUntracked? }` |
+| GET | `/api/repos/:id/branches` | `{ current, local: [{ name, upstream }], remote }`. `remote` lists only branches with no local copy |
+| POST | `/api/repos/:id/switch` | `{ branch, mode? }`. `mode` is `local` (default), `create` (new branch from HEAD) or `remote` (`origin/x` as a tracking branch) |
+| POST | `/api/repos/:id/fetch` | Fetches every remote and prunes deleted branches |
 
-A `checklist` is an array of `{ id?, text, done? }`. Sending one replaces the card's whole list; keep existing `id`s to preserve items.
+A `checklist` is an array of `{ id?, text, done? }`. Sending one replaces the card's whole list; keep existing `id`s to preserve items. `pullRequests` is an array of up to 10 http(s) URLs and also replaces the whole list.
 
-You can also move a card with the **Board** and **Column** selectors in its dialog. Pick **+ New column** to give it a fresh Untitled column. Moving a card between boards keeps its ID and number and drops its release. Moving a column carries its archived cards too. Dropping a card on an empty board, or in the space after the last column, creates an **Untitled column** for it (a dashed preview shows where it will go), and the app then asks you to name it.
+You can also move a card with the **Board** and **Column** selectors in its dialog. Pick **+ New column** to give it a fresh Untitled column. Moving a card between boards keeps its ID and number, and keeps its release unless that release is pinned to the old board. Moving a column carries its archived cards too. Dropping a card on an empty board, or in the space after the last column, creates an **Untitled column** for it (a dashed preview shows where it will go), and the app then asks you to name it.
 </details>
 
 ## Development
@@ -221,7 +251,7 @@ Needs Node `^22.19`, `^24.11` or `>=26` (Node 24 LTS recommended, see `.nvmrc`).
 ```bash
 npm install
 npm run dev          # http://localhost:3000
-npm test             # migrations, persistence, boards, transfers, checklists
+npm test             # migrations, persistence, boards, transfers, checklists, releases, git
 npm run build        # production build
 ```
 
@@ -238,8 +268,9 @@ Without Docker the database is created at `./data/peteyplan.db` (gitignored). Po
 
 - `boards(id, name, emoji, color, position)`
 - `columns(id, board_id, title, position)`
-- `cards(id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at, release_id, viewed_at, checklist)`
-- `releases(id, board_id, title, week_start, preprod_key, prod_key, position)`
+- `cards(id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at, release_id, viewed_at, checklist, pull_requests)`
+- `releases(id, scope_board_id, title, week_start, preprod_key, prod_key, position, done_at)`, where a null `scope_board_id` means shared by every board (`board_id` is legacy)
+- `board_repos(id, board_id, path, position)` for folders linked in the Code panel
 - `work_types(id, label, stages, position)`, where `stages` is JSON and includes Todo and Done
 - `card_counter(id, next)` hands out `PP-n` numbers, which are never reused
 

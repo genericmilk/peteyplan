@@ -1,5 +1,6 @@
 import { updateRelease } from '../../db'
 import { normalizeJiraKey } from '../../utils/jira'
+import { readBoardScope } from '../../utils/release'
 
 export default defineEventHandler(async (event) => {
   const id = getRouterParam(event, 'id')
@@ -8,6 +9,9 @@ export default defineEventHandler(async (event) => {
     weekStart?: unknown
     preprodKey?: unknown
     prodKey?: unknown
+    boardScope?: unknown
+    done?: unknown
+    completeCards?: unknown
   }>(event)
 
   const changes: {
@@ -15,6 +19,9 @@ export default defineEventHandler(async (event) => {
     weekStart?: string
     preprodKey?: string
     prodKey?: string
+    boardScope?: string | null
+    done?: boolean
+    completeCards?: boolean
   } = {}
 
   if (body?.title !== undefined) {
@@ -33,6 +40,17 @@ export default defineEventHandler(async (event) => {
   }
   if (body?.prodKey !== undefined) {
     changes.prodKey = typeof body.prodKey === 'string' ? normalizeJiraKey(body.prodKey) : ''
+  }
+
+  if (body?.boardScope !== undefined) {
+    changes.boardScope = readBoardScope(body.boardScope)
+  }
+  if (body?.done !== undefined) {
+    if (typeof body.done !== 'boolean') {
+      throw createError({ statusCode: 400, statusMessage: 'done must be true or false' })
+    }
+    changes.done = body.done
+    changes.completeCards = body.completeCards === true
   }
 
   const release = updateRelease(id!, changes)

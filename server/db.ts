@@ -16,6 +16,7 @@ import {
   type ProgressId,
 } from './utils/progress'
 import { normalizeChecklist, type ChecklistItem } from '../shared/checklist'
+import { normalizePullRequests } from '../shared/pullRequests'
 
 /**
  * SQLite data layer for PeteyPlan.
@@ -102,6 +103,9 @@ if (!cardColumnNames.has('viewed_at')) {
 if (!cardColumnNames.has('checklist')) {
   db.exec(`ALTER TABLE cards ADD COLUMN checklist TEXT NOT NULL DEFAULT '[]'`)
 }
+if (!cardColumnNames.has('pull_requests')) {
+  db.exec(`ALTER TABLE cards ADD COLUMN pull_requests TEXT NOT NULL DEFAULT '[]'`)
+}
 if (!cardColumnNames.has('number')) {
   db.exec(`ALTER TABLE cards ADD COLUMN number INTEGER`)
   // Backfill existing cards in creation order so refs are stable.
@@ -171,6 +175,31 @@ for (const table of ['columns', 'releases']) {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_board ON ${table} (board_id, position)`)
 }
 
+// Releases are shared across boards unless pinned (scope_board_id); existing ones stay pinned.
+{
+  const fields = new Set((db.prepare('PRAGMA table_info(releases)').all() as { name: string }[]).map((f) => f.name))
+  if (!fields.has('scope_board_id')) {
+    db.exec(`ALTER TABLE releases ADD COLUMN scope_board_id TEXT`)
+    db.exec(`UPDATE releases SET scope_board_id = board_id`)
+  }
+  if (!fields.has('done_at')) {
+    db.exec(`ALTER TABLE releases ADD COLUMN done_at TEXT`)
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_releases_scope ON releases (scope_board_id)`)
+}
+
+/* ── Linked git repositories ───────────────────────────────────────────────── */
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS board_repos (
+    id       TEXT PRIMARY KEY,
+    board_id TEXT NOT NULL,
+    path     TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (board_id, path)
+  );
+`)
+
 // Seed only a fresh database, not an intentionally empty default board.
 const DEFAULT_COLUMNS = [
   { id: 'col-backlog', title: 'Backlog' },
@@ -223,10 +252,42 @@ export function deleteBoard(id: string): boolean {
   if (id === DEFAULT_BOARD_ID || !hasBoard(id)) return false
   db.transaction(() => {
     db.prepare('DELETE FROM columns WHERE board_id = ?').run(id)
-    db.prepare('DELETE FROM releases WHERE board_id = ?').run(id)
+    db.prepare('DELETE FROM releases WHERE scope_board_id = ?').run(id)
+    db.prepare('DELETE FROM board_repos WHERE board_id = ?').run(id)
     db.prepare('DELETE FROM boards WHERE id = ?').run(id)
   })()
   return true
+}
+
+export interface BoardRepo {
+  id: string
+  boardId: string
+  path: string
+}
+
+export function getBoardRepos(boardId: string): BoardRepo[] {
+  return db.prepare('SELECT id, board_id AS boardId, path FROM board_repos WHERE board_id = ? ORDER BY position, rowid')
+    .all(boardId) as BoardRepo[]
+}
+
+export function getRepo(id: string): BoardRepo | undefined {
+  return db.prepare('SELECT id, board_id AS boardId, path FROM board_repos WHERE id = ?').get(id) as BoardRepo | undefined
+}
+
+/** Link a folder to a board; returns the existing link when it's already there. */
+export function addBoardRepo(boardId: string, repoPath: string): BoardRepo {
+  const existing = db.prepare('SELECT id, board_id AS boardId, path FROM board_repos WHERE board_id = ? AND path = ?')
+    .get(boardId, repoPath) as BoardRepo | undefined
+  if (existing) return existing
+  const id = uid('repo')
+  const position = (db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS n FROM board_repos WHERE board_id = ?').get(boardId) as { n: number }).n
+  db.prepare('INSERT INTO board_repos (id, board_id, path, position) VALUES (?, ?, ?, ?)').run(id, boardId, repoPath, position)
+  return { id, boardId, path: repoPath }
+}
+
+/** Unlink a folder. Never touches the files on disk. */
+export function removeBoardRepo(id: string): boolean {
+  return db.prepare('DELETE FROM board_repos WHERE id = ?').run(id).changes > 0
 }
 
 /* ── Work types ────────────────────────────────────────────────────────────── */
@@ -330,11 +391,22 @@ export interface Card {
   releaseId: string | null
   /** To-do items inside the card */
   checklist: ChecklistItem[]
+  /** Linked pull request URLs */
+  pullRequests: string[]
+}
+
+export interface ReleaseCard extends Card {
+  boardId: string
+  columnTitle: string
 }
 
 export interface Release {
   id: string
   title: string
+  /** Board the release is pinned to, or null when shared by every board */
+  boardId: string | null
+  /** ISO datetime when marked done, or null while open */
+  doneAt: string | null
   /** Monday of the release week (YYYY-MM-DD) */
   weekStart: string
   /** Fixed schedule labels for the UI */
@@ -343,7 +415,8 @@ export interface Release {
   /** Atlassian Jira keys (preprod release + prod CM ticket) */
   preprodKey: string
   prodKey: string
-  cards: Card[]
+  /** Every card in the release, archived ones included */
+  cards: ReleaseCard[]
 }
 
 export interface ArchivedCard extends Card {
@@ -353,6 +426,8 @@ export interface ArchivedCard extends Card {
 interface ColumnRow { id: string; title: string; position: number; board_id: string }
 interface ReleaseRow {
   board_id: string
+  scope_board_id: string | null
+  done_at: string | null
   id: string
   title: string
   week_start: string
@@ -376,6 +451,7 @@ interface CardRow {
   release_id: string | null
   viewed_at: string | null
   checklist: string
+  pull_requests: string
 }
 
 /** Prefix for user-facing card refs (`PP-12`). */
@@ -451,13 +527,16 @@ function toCard(row: CardRow): Card {
     columnId: row.column_id,
     releaseId: row.release_id || null,
     checklist: normalizeChecklist(row.checklist),
+    pullRequests: normalizePullRequests(row.pull_requests),
   }
 }
 
-function toRelease(row: ReleaseRow, cards: Card[] = []): Release {
+function toRelease(row: ReleaseRow, cards: ReleaseCard[] = []): Release {
   return {
     id: row.id,
     title: row.title,
+    boardId: row.scope_board_id || null,
+    doneAt: row.done_at || null,
     weekStart: row.week_start,
     preprodSchedule: PREPROD_SCHEDULE_LABEL,
     prodSchedule: PROD_SCHEDULE_LABEL,
@@ -559,7 +638,7 @@ export function getBoard(boardId = DEFAULT_BOARD_ID): { columns: Column[]; relea
   const cards = db
     .prepare(
       `SELECT id, column_id, number, title, description, jira_key, due_by, kind, progress, position,
-              completed_at, archived_at, release_id, viewed_at, checklist
+              completed_at, archived_at, release_id, viewed_at, checklist, pull_requests
        FROM cards
        WHERE archived_at IS NULL AND column_id IN (SELECT id FROM columns WHERE board_id = ?)
        ORDER BY ${CARD_ORDER_SQL}`
@@ -567,10 +646,8 @@ export function getBoard(boardId = DEFAULT_BOARD_ID): { columns: Column[]; relea
     .all(boardId) as CardRow[]
 
   const byColumn = new Map<string, Card[]>()
-  const cardById = new Map<string, Card>()
   for (const row of cards) {
     const card = toCard(row)
-    cardById.set(card.id, card)
     const list = byColumn.get(row.column_id) || []
     list.push(card)
     byColumn.set(row.column_id, list)
@@ -582,7 +659,7 @@ export function getBoard(boardId = DEFAULT_BOARD_ID): { columns: Column[]; relea
       title: col.title,
       cards: byColumn.get(col.id) || [],
     })),
-    releases: getReleases(cardById, boardId),
+    releases: getReleases(boardId),
   }
 }
 
@@ -596,51 +673,69 @@ export function getCardRow(id: string): CardRow | undefined {
   return db.prepare('SELECT * FROM cards WHERE id = ?').get(id) as CardRow | undefined
 }
 
-export function getReleases(cardById?: Map<string, Card>, boardId = DEFAULT_BOARD_ID): Release[] {
+/** Releases visible on a board: shared ones plus those pinned to it. Open first, then done (newest first). */
+export function getReleases(boardId = DEFAULT_BOARD_ID): Release[] {
   const rows = db
     .prepare(
       `SELECT *
        FROM releases
-       WHERE board_id = ?
-       ORDER BY week_start ASC, position ASC, rowid ASC`
+       WHERE scope_board_id IS NULL OR scope_board_id = ?
+       ORDER BY done_at IS NOT NULL, done_at DESC, week_start ASC, position ASC, rowid ASC`
     )
     .all(boardId) as ReleaseRow[]
+  if (rows.length === 0) return []
 
-  let cardsMap = cardById
-  if (!cardsMap) {
-    const cards = db
-      .prepare(
-        `SELECT id, column_id, number, title, description, jira_key, due_by, kind, progress, position,
-                completed_at, archived_at, release_id, viewed_at, checklist
-         FROM cards
-         WHERE archived_at IS NULL AND release_id IS NOT NULL
-         ORDER BY ${CARD_ORDER_SQL}`
-      )
-      .all() as CardRow[]
-    cardsMap = new Map(cards.map((row) => [row.id, toCard(row)]))
-  }
+  const cards = db
+    .prepare(
+      `SELECT c.*, col.board_id AS board_id_of_column, col.title AS column_title
+       FROM cards c
+       JOIN columns col ON col.id = c.column_id
+       WHERE c.release_id IN (${rows.map(() => '?').join(', ')})
+       ORDER BY c.archived_at IS NOT NULL, c.due_by = '', c.due_by, col.board_id, c.position, c.rowid`
+    )
+    .all(...rows.map((row) => row.id)) as (CardRow & { board_id_of_column: string; column_title: string })[]
 
-  const byRelease = new Map<string, Card[]>()
-  for (const card of cardsMap.values()) {
-    if (!card.releaseId) continue
-    const list = byRelease.get(card.releaseId) || []
-    list.push(card)
-    byRelease.set(card.releaseId, list)
+  const byRelease = new Map<string, ReleaseCard[]>()
+  for (const row of cards) {
+    const list = byRelease.get(row.release_id!) || []
+    list.push({ ...toCard(row), boardId: row.board_id_of_column, columnTitle: row.column_title })
+    byRelease.set(row.release_id!, list)
   }
 
   return rows.map((row) => toRelease(row, byRelease.get(row.id) || []))
 }
 
+function getReleaseWithCards(id: string): Release | undefined {
+  const row = getRelease(id)
+  if (!row) return undefined
+  return getReleases(row.scope_board_id ?? DEFAULT_BOARD_ID).find((rel) => rel.id === id)
+}
+
+/** Why a card can't join a release (or null when it can). */
+export function cardReleaseProblem(cardId: string, releaseId: string): string | null {
+  const release = getRelease(releaseId)
+  if (!release) return 'Release not found'
+  if (release.done_at) return 'This release is done. Reopen it to change its cards.'
+  const card = getCardRow(cardId)
+  if (!card || card.archived_at) return 'Card not found'
+  if (release.scope_board_id && release.scope_board_id !== getColumn(card.column_id)?.board_id) {
+    return 'This release only takes cards from its own board'
+  }
+  return null
+}
+
+const VISIBLE_SQL = '(scope_board_id IS NULL OR scope_board_id = ?)'
+
 /** First unused Monday on/after today (or after the latest existing release). */
 export function suggestNextWeekStart(boardId = DEFAULT_BOARD_ID): string {
   const latest = db
-    .prepare('SELECT week_start FROM releases WHERE board_id = ? ORDER BY week_start DESC LIMIT 1')
+    .prepare(`SELECT week_start FROM releases WHERE ${VISIBLE_SQL} ORDER BY week_start DESC LIMIT 1`)
     .get(boardId) as { week_start: string } | undefined
   let candidate = nextMondayIso()
   if (latest?.week_start && latest.week_start >= candidate) {
     candidate = mondayAfter(latest.week_start)
   }
-  while (db.prepare('SELECT 1 FROM releases WHERE week_start = ? AND board_id = ?').get(candidate, boardId)) {
+  while (db.prepare(`SELECT 1 FROM releases WHERE week_start = ? AND ${VISIBLE_SQL}`).get(candidate, boardId)) {
     candidate = mondayAfter(candidate)
   }
   return candidate
@@ -651,15 +746,20 @@ export function addRelease(input: {
   weekStart?: string
   preprodKey?: string
   prodKey?: string
+  /** Board to pin to; null or omitted makes a shared release */
+  boardScope?: string | null
 }, boardId = DEFAULT_BOARD_ID): Release {
+  const scope = input.boardScope || null
   const weekStart = input.weekStart && /^\d{4}-\d{2}-\d{2}$/.test(input.weekStart)
     ? input.weekStart
-    : suggestNextWeekStart(boardId)
+    : suggestNextWeekStart(scope ?? boardId)
   const title = (input.title || '').trim() || defaultReleaseTitle(weekStart)
   const position =
     (db.prepare('SELECT COALESCE(MAX(position), -1) AS m FROM releases').get() as { m: number }).m + 1
   const row: ReleaseRow = {
-    board_id: boardId,
+    board_id: scope ?? boardId,
+    scope_board_id: scope,
+    done_at: null,
     id: uid('rel'),
     title,
     week_start: weekStart,
@@ -668,9 +768,9 @@ export function addRelease(input: {
     position,
   }
   db.prepare(
-    `INSERT INTO releases (id, title, week_start, preprod_key, prod_key, position, board_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(row.id, row.title, row.week_start, row.preprod_key, row.prod_key, row.position, boardId)
+    `INSERT INTO releases (id, title, week_start, preprod_key, prod_key, position, board_id, scope_board_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(row.id, row.title, row.week_start, row.preprod_key, row.prod_key, row.position, row.board_id, scope)
   return toRelease(row, [])
 }
 
@@ -681,6 +781,11 @@ export function updateRelease(
     weekStart?: string
     preprodKey?: string
     prodKey?: string
+    /** Board to pin to, or null to share; pinning drops cards from other boards */
+    boardScope?: string | null
+    done?: boolean
+    /** With done: true, also move the release's unfinished cards to Done */
+    completeCards?: boolean
   }
 ): Release | undefined {
   const existing = getRelease(id)
@@ -693,14 +798,32 @@ export function updateRelease(
       : existing.week_start
   const preprod_key = changes.preprodKey !== undefined ? changes.preprodKey : existing.preprod_key
   const prod_key = changes.prodKey !== undefined ? changes.prodKey : existing.prod_key
+  const scope = changes.boardScope !== undefined ? changes.boardScope || null : existing.scope_board_id
+  const done_at = changes.done === undefined
+    ? existing.done_at
+    : changes.done ? existing.done_at || nowIso() : null
 
-  db.prepare(
-    `UPDATE releases SET title = ?, week_start = ?, preprod_key = ?, prod_key = ? WHERE id = ?`
-  ).run(title, week_start, preprod_key, prod_key, id)
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE releases
+       SET title = ?, week_start = ?, preprod_key = ?, prod_key = ?, scope_board_id = ?, board_id = ?, done_at = ?
+       WHERE id = ?`
+    ).run(title, week_start, preprod_key, prod_key, scope, scope ?? existing.board_id, done_at, id)
+    if (scope && scope !== existing.scope_board_id) {
+      db.prepare(
+        `UPDATE cards SET release_id = NULL
+         WHERE release_id = ? AND column_id NOT IN (SELECT id FROM columns WHERE board_id = ?)`
+      ).run(id, scope)
+    }
+    if (changes.done && changes.completeCards) {
+      db.prepare(
+        `UPDATE cards SET progress = 'done', completed_at = ?
+         WHERE release_id = ? AND archived_at IS NULL AND progress != 'done'`
+      ).run(nowIso(), id)
+    }
+  })()
 
-  const updated = getRelease(id)!
-  const cards = getReleases(undefined, existing.board_id).find((r) => r.id === id)?.cards || []
-  return toRelease(updated, cards)
+  return getReleaseWithCards(id)
 }
 
 export function deleteRelease(id: string): boolean {
@@ -712,10 +835,12 @@ export function deleteRelease(id: string): boolean {
   return true
 }
 
+/** Put a card in a release (or take it out with null). Done releases are frozen. */
 export function setCardRelease(cardId: string, releaseId: string | null): CardRow | undefined {
   const existing = db.prepare('SELECT * FROM cards WHERE id = ?').get(cardId) as CardRow | undefined
   if (!existing || existing.archived_at) return undefined
-  if (releaseId && getRelease(releaseId)?.board_id !== getColumn(existing.column_id)?.board_id) return undefined
+  if (releaseId && cardReleaseProblem(cardId, releaseId)) return undefined
+  if (!releaseId && existing.release_id && getRelease(existing.release_id)?.done_at) return undefined
   db.prepare('UPDATE cards SET release_id = ? WHERE id = ?').run(releaseId, cardId)
   return db.prepare('SELECT * FROM cards WHERE id = ?').get(cardId) as CardRow
 }
@@ -726,7 +851,7 @@ export function getArchivedCards(boardId = DEFAULT_BOARD_ID): ArchivedCard[] {
   const rows = db
     .prepare(
       `SELECT c.id, c.column_id, c.number, c.title, c.description, c.jira_key, c.due_by, c.kind, c.progress,
-              c.position, c.completed_at, c.archived_at, c.release_id, c.viewed_at, c.checklist, col.title AS column_title
+              c.position, c.completed_at, c.archived_at, c.release_id, c.viewed_at, c.checklist, c.pull_requests, col.title AS column_title
        FROM cards c
        LEFT JOIN columns col ON col.id = c.column_id
        WHERE c.archived_at IS NOT NULL AND col.board_id = ?
@@ -834,7 +959,8 @@ export function addCard(
   kind: KindId = defaultKind(),
   /** When true (UI create), card starts viewed so no unread dot. MCP/API leave null. */
   markViewed = false,
-  checklist: ChecklistItem[] = []
+  checklist: ChecklistItem[] = [],
+  pullRequests: string[] = []
 ): CardRow | undefined {
   if (!getColumn(columnId)) return undefined
   const position =
@@ -864,11 +990,12 @@ export function addCard(
     release_id: null,
     viewed_at,
     checklist: JSON.stringify(normalizeChecklist(checklist)),
+    pull_requests: JSON.stringify(normalizePullRequests(pullRequests)),
   }
   db.prepare(
     `INSERT INTO cards
-     (id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at, release_id, viewed_at, checklist)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, column_id, number, title, description, jira_key, due_by, kind, progress, position, completed_at, archived_at, release_id, viewed_at, checklist, pull_requests)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     card.id,
     card.column_id,
@@ -884,7 +1011,8 @@ export function addCard(
     card.archived_at,
     card.release_id,
     card.viewed_at,
-    card.checklist
+    card.checklist,
+    card.pull_requests
   )
   rerankColumnByDue(columnId)
   const ranked = db.prepare('SELECT * FROM cards WHERE id = ?').get(card.id) as CardRow
@@ -905,6 +1033,7 @@ export function updateCard(
     /** Set true to mark the card as viewed */
     viewed?: boolean
     checklist?: ChecklistItem[]
+    pullRequests?: string[]
   }
 ): CardRow | undefined {
   const existing = db.prepare('SELECT * FROM cards WHERE id = ?').get(id) as CardRow | undefined
@@ -925,18 +1054,23 @@ export function updateCard(
   const completed_at = resolveCompletedAt(progress, existing.progress, existing.completed_at)
   let release_id = existing.release_id
   if (changes.releaseId !== undefined) {
-    if (changes.releaseId && getRelease(changes.releaseId)?.board_id !== getColumn(existing.column_id)?.board_id) return undefined
+    if (changes.releaseId !== existing.release_id) {
+      if (changes.releaseId && cardReleaseProblem(id, changes.releaseId)) return undefined
+      if (existing.release_id && getRelease(existing.release_id)?.done_at) return undefined
+    }
     release_id = changes.releaseId
   }
   const viewed_at =
     changes.viewed === true && !existing.viewed_at ? nowIso() : existing.viewed_at
   const checklist =
     changes.checklist !== undefined ? JSON.stringify(normalizeChecklist(changes.checklist)) : existing.checklist
+  const pull_requests =
+    changes.pullRequests !== undefined ? JSON.stringify(normalizePullRequests(changes.pullRequests)) : existing.pull_requests
   db.prepare(
     `UPDATE cards
-     SET title = ?, description = ?, jira_key = ?, due_by = ?, kind = ?, progress = ?, completed_at = ?, release_id = ?, viewed_at = ?, checklist = ?
+     SET title = ?, description = ?, jira_key = ?, due_by = ?, kind = ?, progress = ?, completed_at = ?, release_id = ?, viewed_at = ?, checklist = ?, pull_requests = ?
      WHERE id = ?`
-  ).run(title, description, jira_key, due_by, kind, progress, completed_at, release_id, viewed_at, checklist, id)
+  ).run(title, description, jira_key, due_by, kind, progress, completed_at, release_id, viewed_at, checklist, pull_requests, id)
 
   rerankColumnByDue(existing.column_id)
   return db.prepare('SELECT * FROM cards WHERE id = ?').get(id) as CardRow
@@ -1042,6 +1176,13 @@ export function reorderCards(columnId: string, orderedIds: string[]): boolean {
   return true
 }
 
+/** Whether a card's release still applies once the card lives on `boardId`. */
+function releaseFollows(releaseId: string | null, boardId: string): boolean {
+  if (!releaseId) return false
+  const scope = getRelease(releaseId)?.scope_board_id
+  return !scope || scope === boardId
+}
+
 /** Title for the column made when a card is dropped onto a board with no columns. */
 export const UNTITLED_COLUMN_TITLE = 'Untitled column'
 
@@ -1066,7 +1207,11 @@ export function transferBoardItem(
       ids.splice(Math.min(targetPosition ?? ids.length, ids.length), 0, source.id)
       db.prepare('UPDATE columns SET board_id = ? WHERE id = ?').run(toBoardId, source.id)
       if (fromBoardId !== toBoardId) {
-        db.prepare('UPDATE cards SET release_id = NULL WHERE column_id = ?').run(source.id)
+        // Shared releases follow the cards; ones pinned to the old board don't.
+        db.prepare(
+          `UPDATE cards SET release_id = NULL
+           WHERE column_id = ? AND release_id IN (SELECT id FROM releases WHERE scope_board_id IS NOT NULL AND scope_board_id != ?)`
+        ).run(source.id, toBoardId)
       }
       reorderColumns(ids, toBoardId)
     })()
@@ -1083,7 +1228,7 @@ export function transferBoardItem(
       .all(target.id, moved.id) as { id: string }[]).map((entry) => entry.id)
     ids.splice(Math.min(targetPosition ?? ids.length, ids.length), 0, moved.id)
     db.prepare('UPDATE cards SET column_id = ?, release_id = ? WHERE id = ?').run(
-      target.id, fromBoardId === toBoardId ? moved.release_id : null, moved.id
+      target.id, releaseFollows(moved.release_id, toBoardId) ? moved.release_id : null, moved.id
     )
     reorderCards(target.id, ids)
     rerankColumnByDue(source.id)

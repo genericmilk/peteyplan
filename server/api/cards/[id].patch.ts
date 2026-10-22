@@ -1,5 +1,6 @@
 import { normalizeChecklist } from '../../../shared/checklist'
-import { cardRef, resolveCardId, updateCard } from '../../db'
+import { normalizePullRequests } from '../../../shared/pullRequests'
+import { cardRef, cardReleaseProblem, getCardRow, getRelease, resolveCardId, updateCard } from '../../db'
 import { normalizeDueBy } from '../../utils/due'
 import { normalizeJiraKey } from '../../utils/jira'
 import { normalizeKind, normalizeProgress } from '../../utils/progress'
@@ -16,6 +17,7 @@ export default defineEventHandler(async (event) => {
     releaseId?: unknown
     viewed?: unknown
     checklist?: unknown
+    pullRequests?: unknown
   }>(event)
 
   const changes: {
@@ -28,6 +30,7 @@ export default defineEventHandler(async (event) => {
     releaseId?: string | null
     viewed?: boolean
     checklist?: ReturnType<typeof normalizeChecklist>
+    pullRequests?: string[]
   } = {}
   if (body?.title !== undefined) {
     const title = typeof body.title === 'string' ? body.title.trim() : ''
@@ -73,8 +76,24 @@ export default defineEventHandler(async (event) => {
     }
     changes.checklist = normalizeChecklist(body.checklist)
   }
+  if (body?.pullRequests !== undefined) {
+    if (!Array.isArray(body.pullRequests)) {
+      throw createError({ statusCode: 400, statusMessage: 'pullRequests must be an array of URLs' })
+    }
+    changes.pullRequests = normalizePullRequests(body.pullRequests)
+  }
 
-  const card = updateCard(resolveCardId(id!), changes)
+  const cardId = resolveCardId(id!)
+  const current = getCardRow(cardId)
+  if (current && changes.releaseId !== undefined && changes.releaseId !== current.release_id) {
+    if (current.release_id && getRelease(current.release_id)?.done_at) {
+      throw createError({ statusCode: 409, statusMessage: 'Its release is done. Reopen it to change its cards.' })
+    }
+    const problem = changes.releaseId && cardReleaseProblem(cardId, changes.releaseId)
+    if (problem) throw createError({ statusCode: problem.endsWith('not found') ? 404 : 409, statusMessage: problem })
+  }
+
+  const card = updateCard(cardId, changes)
   if (!card) {
     throw createError({ statusCode: 404, statusMessage: 'Card not found' })
   }
@@ -92,6 +111,7 @@ export default defineEventHandler(async (event) => {
     archivedAt: card.archived_at,
     viewedAt: card.viewed_at,
     checklist: normalizeChecklist(card.checklist),
+    pullRequests: normalizePullRequests(card.pull_requests),
     columnId: card.column_id,
     releaseId: card.release_id,
     position: card.position,

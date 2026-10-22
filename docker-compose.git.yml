@@ -1,0 +1,21 @@
+# Lets the Code panel reach your git repositories from inside Docker.
+#
+#   CODE_DIR=$HOME/Projects docker compose -f docker-compose.yml -f docker-compose.git.yml up -d --build
+#
+# CODE_DIR is mounted at the same path inside the container, so folders you
+# link in PeteyPlan are the same paths you use on your machine.
+services:
+  peteyplan:
+    environment:
+      CODE_DIR: ${CODE_DIR:?Set CODE_DIR to the folder that holds your projects}
+      # Mounted repos are owned by your user, not the container's; let git use them.
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: "*"
+    volumes:
+      - ${CODE_DIR}:${CODE_DIR}
+      - ${HOME}/.ssh:/home/node/.ssh:ro
+      - ${HOME}/.gitconfig:/home/node/.gitconfig:ro
+    # The Code panel can commit, push and discard changes, so only listen on this machine.
+    ports: !override
+      - "127.0.0.1:3000:3000"
