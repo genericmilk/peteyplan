@@ -111,6 +111,66 @@ Return to the latest version with `git checkout main && git pull`.
 | View logs | `docker compose logs -f` |
 | **Delete everything**, including your board | `docker compose down -v` |
 
+### Troubleshooting the Docker build
+
+See the full error first, since the lines just above the failing step say what went wrong:
+
+```bash
+docker compose build --no-cache --progress=plain 2>&1 | tail -40
+```
+
+<details>
+<summary><strong><code>apt-get</code> fails with exit code 100</strong></summary>
+
+The image installs git, ssh and ca-certificates from the Debian mirrors (`deb.debian.org`) for the **Code** panel. Exit code 100 means apt couldn't download or verify them. It isn't specific to x64, Apple silicon or Windows. Look for one of these just above the error:
+
+| Message | Cause | Fix |
+| ------- | ----- | --- |
+| `Temporary failure resolving 'deb.debian.org'` | Docker can't resolve DNS | Restart Docker Desktop. On a VPN, set a DNS server under **Settings → Docker Engine**, e.g. `"dns": ["8.8.8.8"]` |
+| `Could not connect`, `Connection timed out` or `403` | A proxy or firewall is in the way | Set the proxy under **Settings → Resources → Proxies** in Docker Desktop, or pass it to the build (below) |
+| `Hash Sum mismatch` or `Release file … is not valid yet` | A mirror was mid-update, or the clock is wrong | Wait a few minutes and rebuild with `--no-cache`. Check the machine's date and time |
+| `Unable to locate package` | `apt-get update` didn't get a package list | Same as the connection fixes above |
+
+Pass a proxy to the build:
+
+```bash
+docker compose build --no-cache \
+  --build-arg HTTP_PROXY=$HTTP_PROXY \
+  --build-arg HTTPS_PROXY=$HTTPS_PROXY \
+  --build-arg NO_PROXY=$NO_PROXY
+docker compose up -d
+```
+
+On Windows, set the variables first in PowerShell (`$env:HTTP_PROXY = "http://proxy.example.com:8080"`), or put the values straight into the command.
+</details>
+
+<details>
+<summary><strong><code>npm ci</code> fails with <code>SELF_SIGNED_CERT_IN_CHAIN</code>, <code>ETIMEDOUT</code> or <code>ECONNRESET</code></strong></summary>
+
+The build couldn't reach the npm registry. That's usually the same proxy problem: pass the proxy build args above. `SELF_SIGNED_CERT_IN_CHAIN` means a work network is inspecting HTTPS traffic, so the build needs your company's root certificate. Ask IT for it, or build on a network without inspection.
+</details>
+
+<details>
+<summary><strong>Errors mentioning <code>\r</code>, <code>$'\r': command not found</code> or "unknown instruction" on Windows</strong></summary>
+
+Git converted the files to Windows line endings when it cloned them, which breaks commands that span several lines in the `Dockerfile`. Switch to Unix line endings and check the files out again:
+
+```bash
+git config core.autocrlf input
+git rm --cached -r -q .
+git reset --hard
+docker compose build --no-cache
+```
+
+`git reset --hard` throws away uncommitted changes in this folder, which is fine on a plain clone of PeteyPlan.
+</details>
+
+<details>
+<summary><strong>Port 3000 is already in use</strong></summary>
+
+Something else is listening on 3000. Run PeteyPlan on another port (see [Run on a different port](#install-with-docker)), or find what's using it with `lsof -i :3000` on macOS/Linux or `netstat -ano | findstr :3000` on Windows.
+</details>
+
 ## Features
 
 **Boards and cards**
