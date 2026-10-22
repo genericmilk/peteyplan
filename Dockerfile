@@ -32,10 +32,23 @@ ENV DATA_DIR=/data
 
 # git + ssh for the Code panel (linked project folders). Off by default so the
 # plain image never needs the Debian mirrors; docker-compose.git.yml turns it on.
-# Behind a proxy, pass HTTP_PROXY/HTTPS_PROXY as build args.
+# Behind an intercepting proxy, drop the proxy's CA as .corp-ca.pem next to
+# this file (gitignored) and apt uses HTTPS mirrors instead of plain HTTP:
+#   cp ~/corp-ca.pem .corp-ca.pem
+#   docker compose -f docker-compose.yml -f docker-compose.git.yml up -d --build
 ARG WITH_GIT=false
+# .dockerignore always matches, so this works with or without .corp-ca.pem.
+COPY .corp-ca.pem* .dockerignore /tmp/corp-ca/
 RUN if [ "$WITH_GIT" = "true" ]; then \
-    apt-get -o Acquire::Retries=5 update \
+    CA=/tmp/corp-ca/.corp-ca.pem; \
+    if [ -s "$CA" ] && grep -q 'BEGIN CERTIFICATE' "$CA"; then \
+      mkdir -p /etc/ssl/certs /usr/local/share/ca-certificates \
+      && awk '/BEGIN CERTIFICATE/{p=1} p' "$CA" > /etc/ssl/certs/ca-certificates.crt \
+      && cp /etc/ssl/certs/ca-certificates.crt /usr/local/share/ca-certificates/corp-ca.crt \
+      && sed -i 's|http://|https://|g' /etc/apt/sources.list.d/*.sources; \
+    fi \
+    && rm -rf /tmp/corp-ca \
+    && apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --no-install-recommends git openssh-client ca-certificates \
     && rm -rf /var/lib/apt/lists/*; \
   fi

@@ -11,16 +11,46 @@ services:
         WITH_GIT: "true"
     # Separate tag so the plain and git images don't overwrite each other.
     image: peteyplan:git
+    # Extract your name/email from the mounted ~/.gitconfig into a container
+    # gitconfig without the host-only plumbing (gh credential helper, host CA
+    # path, host-only proxy). Safe.directory lets git use your mounted repos.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        {
+          echo '[safe]'
+          echo '	directory = *'
+          echo '[user]'
+          git config -f /home/node/.gitconfig user.name 2>/dev/null | sed 's/^/	name = /'
+          git config -f /home/node/.gitconfig user.email 2>/dev/null | sed 's/^/	email = /'
+          echo '[credential]'
+          echo '	helper = store --file=/home/node/.git-credentials.container'
+        } > /home/node/.gitconfig.container
+        # Writable copy: the mount is read-only and git rewrites the file even
+        # when nothing changed. Pre-seed from the host store (may not exist).
+        cp /home/node/.git-credentials /home/node/.git-credentials.container 2>/dev/null || true
+        touch /home/node/.git-credentials.container
+        exec node .output/server/index.mjs
     environment:
       CODE_DIR: ${CODE_DIR:?Set CODE_DIR to the folder that holds your projects}
       # Mounted repos are owned by your user, not the container's; let git use them.
       GIT_CONFIG_COUNT: "1"
       GIT_CONFIG_KEY_0: safe.directory
       GIT_CONFIG_VALUE_0: "*"
+      # GIT_CONFIG_GLOBAL points git at this generated file instead of the
+      # mounted ~/.gitconfig: the host file hardcodes machine-specific paths
+      # (gh helper, host-only proxy, host CA bundle) plus your identity, so we
+      # keep only the identity here and let the container's git and its own CA
+      # bundle handle credentials, proxy and TLS.
+      GIT_CONFIG_GLOBAL: /home/node/.gitconfig.container
     volumes:
       - ${CODE_DIR}:${CODE_DIR}
+      # Read-only: name/email/signing key for commit authorship, and the
+      # password store the container's git falls back to for HTTPS auth.
       - ${HOME}/.ssh:/home/node/.ssh:ro
       - ${HOME}/.gitconfig:/home/node/.gitconfig:ro
+      - ${HOME}/.git-credentials:/home/node/.git-credentials:ro
     # The Code panel can commit, push and discard changes, so only listen on this machine.
     ports: !override
       - "127.0.0.1:3000:3000"

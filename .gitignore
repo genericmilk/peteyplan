@@ -21,6 +21,8 @@ data/
 *.sqlite-shm
 
 # Environment / secrets
+# Local intercepting-proxy CA for the Docker git image (see Dockerfile).
+.corp-ca.pem
 .env
 .env.*
 !.env.example
