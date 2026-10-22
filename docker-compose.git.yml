@@ -6,6 +6,11 @@
 # link in PeteyPlan are the same paths you use on your machine.
 services:
   peteyplan:
+    build:
+      args:
+        WITH_GIT: "true"
+    # Separate tag so the plain and git images don't overwrite each other.
+    image: peteyplan:git
     environment:
       CODE_DIR: ${CODE_DIR:?Set CODE_DIR to the folder that holds your projects}
       # Mounted repos are owned by your user, not the container's; let git use them.

@@ -122,7 +122,7 @@ docker compose build --no-cache --progress=plain 2>&1 | tail -40
 <details>
 <summary><strong><code>apt-get</code> fails with exit code 100</strong></summary>
 
-The image installs git, ssh and ca-certificates from the Debian mirrors (`deb.debian.org`) for the **Code** panel. Exit code 100 means apt couldn't download or verify them. It isn't specific to x64, Apple silicon or Windows. Look for one of these just above the error:
+This only happens with the [git override](#git-integration) (`docker-compose.git.yml`). That's the one build that installs git, ssh and ca-certificates from the Debian mirrors (`deb.debian.org`) for the **Code** panel. The plain `docker compose up -d --build` doesn't use apt, so it can't hit this. Exit code 100 means apt couldn't download or verify the packages. It isn't specific to x64, Apple silicon or Windows. Look for one of these just above the error:
 
 | Message | Cause | Fix |
 | ------- | ----- | --- |
@@ -134,12 +134,14 @@ The image installs git, ssh and ca-certificates from the Debian mirrors (`deb.de
 Pass a proxy to the build:
 
 ```bash
-docker compose build --no-cache \
+CODE_DIR=$HOME/Projects docker compose -f docker-compose.yml -f docker-compose.git.yml build --no-cache \
   --build-arg HTTP_PROXY=$HTTP_PROXY \
   --build-arg HTTPS_PROXY=$HTTPS_PROXY \
   --build-arg NO_PROXY=$NO_PROXY
-docker compose up -d
+CODE_DIR=$HOME/Projects docker compose -f docker-compose.yml -f docker-compose.git.yml up -d
 ```
+
+You can't use the Code panel from Docker until this build works. The plain `docker compose up -d --build` still runs PeteyPlan in the meantime.
 
 On Windows, set the variables first in PowerShell (`$env:HTTP_PROXY = "http://proxy.example.com:8080"`), or put the values straight into the command.
 </details>
@@ -208,6 +210,8 @@ The **Code** panel runs the `git` installed on the machine that runs the PeteyPl
   ```bash
   CODE_DIR=$HOME/Projects docker compose -f docker-compose.yml -f docker-compose.git.yml up -d --build
   ```
+
+  Only this override installs git into the image, so the plain `docker compose up` never needs the Debian package mirrors. If that build fails at `apt-get` with exit code 100, see [Troubleshooting the Docker build](#troubleshooting-the-docker-build).
 
   SSH remotes work with keys that have no passphrase. HTTPS remotes need a credential helper that works inside Linux, so the macOS Keychain helper won't. **Browse…** lists the mounted folder as **Code folder**.
 
