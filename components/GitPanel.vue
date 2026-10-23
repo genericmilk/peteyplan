@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { confirmDialog, requestDialogClose, vModal } from '~/composables/useModal'
-import { vDismiss } from '~/composables/useDropdown'
+import { menuPosition, vDismiss } from '~/composables/useDropdown'
+import { joinRepoPath, useEditors } from '~/composables/useEditors'
 import {
   PhArrowUp,
   PhArrowsClockwise,
@@ -52,6 +53,8 @@ const props = defineProps<{ boardId: string; boardName: string; open: boolean }>
 const emit = defineEmits<{
   /** Number of linked repos with uncommitted or unpushed work */
   attention: [count: number]
+  /** A file was clicked with no editor set up yet */
+  configureEditors: []
 }>()
 
 const POLL_MS = 30_000
@@ -202,6 +205,50 @@ function baseName(file: string): string {
 function dirName(file: string): string {
   const at = file.lastIndexOf('/')
   return at > 0 ? file.slice(0, at) : ''
+}
+
+/* ── Open in editor ─────────────────────────────────────────────────────────── */
+
+const { editors, defaultEditor, openInEditor } = useEditors()
+const openWith = ref<{ top: number; right: number; path: string } | null>(null)
+
+function canOpen(file: GitFile): boolean {
+  return fileCode(file) !== 'D'
+}
+
+function openTitle(file: GitFile): string {
+  if (!canOpen(file)) return 'Deleted, so there is nothing to open'
+  return defaultEditor.value ? `Open in ${defaultEditor.value.name}` : 'Choose an editor to open files in'
+}
+
+function openRepoTitle(): string {
+  return defaultEditor.value ? `Open the folder in ${defaultEditor.value.name}` : 'Choose an editor to open folders in'
+}
+
+function openPath(path: string) {
+  if (!defaultEditor.value) return emit('configureEditors')
+  openInEditor(defaultEditor.value, path)
+}
+
+function openRepo(repo: Repo) {
+  openPath(joinRepoPath(repo.path, ''))
+}
+
+function openFile(repo: Repo, file: GitFile) {
+  if (canOpen(file)) openPath(joinRepoPath(repo.path, file.path))
+}
+
+function toggleOpenWith(event: MouseEvent, path: string) {
+  openWith.value = openWith.value?.path === path
+    ? null
+    : { ...menuPosition(event.currentTarget as Element, 'right', 200) as { top: number; right: number }, path }
+}
+
+function openWithEditor(id: string) {
+  const editor = editors.value.find((entry) => entry.id === id)
+  const target = openWith.value
+  openWith.value = null
+  if (editor && target) openInEditor(editor, target.path)
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -450,7 +497,18 @@ onBeforeUnmount(() => {
         <header class="code-repo-head">
           <span class="code-repo-icon" aria-hidden="true"><PhFolderOpen :size="18" /></span>
           <div class="code-repo-name">
-            <h3 :title="repo.path">{{ repo.name }}</h3>
+            <h3>
+              <button type="button" class="code-repo-open" :title="repo.path + '\n' + openRepoTitle()" @click="openRepo(repo)">{{ repo.name }}</button>
+              <button
+                v-if="editors.length > 1"
+                type="button"
+                class="code-file-with"
+                :aria-label="'Open ' + repo.name + ' with…'"
+                title="Open with…"
+                aria-haspopup="menu"
+                @click="toggleOpenWith($event, joinRepoPath(repo.path, ''))"
+              ><PhCaretDown :size="11" weight="bold" aria-hidden="true" /></button>
+            </h3>
             <span class="code-repo-path" :title="repo.path">{{ repo.path }}</span>
           </div>
           <button
@@ -498,13 +556,30 @@ onBeforeUnmount(() => {
         <p v-if="repo.error" class="code-repo-error">{{ repo.error }}</p>
 
         <ul v-if="repo.status?.files.length" class="code-files">
-          <li v-for="file in repo.status.files" :key="file.path" :title="(file.from ? file.from + ' → ' : '') + file.path">
-            <code class="code-file-status" :data-code="fileCode(file)" :title="STATUS_LABELS[fileCode(file)]">{{ fileCode(file) }}</code>
-            <span class="code-file-name">{{ baseName(file.path) }}</span>
-            <span class="code-file-dir">
-              <template v-if="file.from">from {{ file.from }}</template>
-              <template v-else>{{ dirName(file.path) }}</template>
-            </span>
+          <li v-for="file in repo.status.files" :key="file.path">
+            <button
+              type="button"
+              class="code-file-open"
+              :disabled="!canOpen(file)"
+              :title="(file.from ? file.from + ' → ' : '') + file.path + '\n' + openTitle(file)"
+              @click="openFile(repo, file)"
+            >
+              <code class="code-file-status" :data-code="fileCode(file)" :aria-label="STATUS_LABELS[fileCode(file)]">{{ fileCode(file) }}</code>
+              <span class="code-file-name">{{ baseName(file.path) }}</span>
+              <span class="code-file-dir">
+                <template v-if="file.from">from {{ file.from }}</template>
+                <template v-else>{{ dirName(file.path) }}</template>
+              </span>
+            </button>
+            <button
+              v-if="editors.length > 1 && canOpen(file)"
+              type="button"
+              class="code-file-with"
+              :aria-label="'Open ' + baseName(file.path) + ' with…'"
+              title="Open with…"
+              aria-haspopup="menu"
+              @click="toggleOpenWith($event, joinRepoPath(repo.path, file.path))"
+            ><PhCaretDown :size="11" weight="bold" aria-hidden="true" /></button>
           </li>
         </ul>
         <div v-else-if="repo.status" class="code-clean">
@@ -769,5 +844,18 @@ onBeforeUnmount(() => {
         </div>
       </form>
     </dialog>
+    <Teleport v-if="openWith" to="body">
+      <div class="release-new-backdrop" @click="openWith = null"></div>
+      <div
+        v-dismiss="() => { openWith = null }"
+        class="column-menu code-open-with-menu"
+        role="menu"
+        :style="{ top: openWith.top + 'px', right: openWith.right + 'px' }"
+      >
+        <button v-for="editor in editors" :key="editor.id" type="button" role="menuitem" @click="openWithEditor(editor.id)">
+          {{ editor.name }}<small v-if="editor.id === defaultEditor?.id">Default</small>
+        </button>
+      </div>
+    </Teleport>
   </section>
 </template>
