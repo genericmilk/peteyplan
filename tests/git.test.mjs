@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, test } from 'node:test'
 
-const { GitError, gitBranches, gitCommitAll, gitDiscard, gitFetch, gitPush, gitStatus, gitSwitch, parseGitStatus, parseWslPath, resolveRepoRoot, wslUncPath } =
+const { GitError, gitBranches, gitCommitAll, gitDiscard, gitFetch, gitPull, gitPush, gitStatus, gitSwitch, parseGitStatus, parseWslPath, resolveRepoRoot, wslUncPath } =
   await import('../server/utils/git.ts')
 const { FolderError, listFolders } = await import('../server/utils/folders.ts')
 
@@ -144,6 +144,45 @@ test('lists folders, flags repositories and hides dot folders', () => {
   assert.equal(listFolders(path.join(base, 'Beta')).repo, true)
   assert.equal(listFolders('/').parent, null)
   assert.throws(() => listFolders(path.join(base, 'file.txt')), FolderError)
+})
+
+test('pulls the upstream fast-forward only', async () => {
+  const remote = path.join(root, 'pull-remote.git')
+  git(root, 'init', '-q', '--bare', '-b', 'main', remote)
+  const repo = makeRepo('pull')
+  write(repo, 'a.txt', 'one\n')
+  await gitCommitAll(repo, 'First', false)
+  await assert.rejects(gitPull(repo), /no upstream/)
+  git(repo, 'remote', 'add', 'origin', remote)
+  await gitPush(repo)
+
+  const other = path.join(root, 'pull-clone')
+  git(root, 'clone', '-q', remote, other)
+  git(other, 'config', 'user.email', 'o@example.com')
+  git(other, 'config', 'user.name', 'Other')
+  const pushFromOther = (file, text) => {
+    write(other, file, text)
+    git(other, 'add', '.')
+    git(other, '-c', 'commit.gpgsign=false', 'commit', '-qm', `Add ${file}`)
+    git(other, 'push', '-q')
+  }
+
+  pushFromOther('b.txt', 'theirs\n')
+  await gitFetch(repo)
+  assert.equal((await gitStatus(repo)).behind, 1)
+  // Uncommitted edits to other files come along.
+  write(repo, 'a.txt', 'local edit\n')
+  await gitPull(repo)
+  const status = await gitStatus(repo)
+  assert.equal(status.behind, 0)
+  assert.equal(readFileSync(path.join(repo, 'b.txt'), 'utf8'), 'theirs\n')
+  assert.equal(readFileSync(path.join(repo, 'a.txt'), 'utf8'), 'local edit\n')
+
+  // Both sides move on: refuse rather than merge.
+  await gitCommitAll(repo, 'Mine', false)
+  pushFromOther('c.txt', 'more\n')
+  await assert.rejects(gitPull(repo), (err) => err instanceof GitError && err.status === 409 && /both moved on/.test(err.message))
+  assert.equal(existsSync(path.join(repo, 'c.txt')), false)
 })
 
 test('lists, creates and switches branches', async () => {

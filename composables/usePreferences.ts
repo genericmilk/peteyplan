@@ -7,6 +7,7 @@ export type MotionPref = 'snappy' | 'normal' | 'relaxed' | 'off'
 export type DensityPref = 'comfortable' | 'compact'
 export type SurfacePref = 'glass' | 'solid'
 export type ElasticityPref = 'loose' | 'normal' | 'firm' | 'none'
+export type ScrollSwitchPref = 'on' | 'off'
 
 export interface Preferences {
   theme: ThemePref
@@ -14,6 +15,8 @@ export interface Preferences {
   density: DensityPref
   surface: SurfacePref
   elasticity: ElasticityPref
+  /** Scrolling past a board's edge moves to the next board */
+  scrollSwitch: ScrollSwitchPref
 }
 
 export const THEME_OPTIONS: { id: ThemePref; label: string }[] = [
@@ -51,10 +54,15 @@ export const ELASTICITY_OPTIONS: { id: ElasticityPref; label: string; distance: 
   { id: 'none', label: 'None', distance: 1, stretch: 0 },
 ]
 
+export const SCROLL_SWITCH_OPTIONS: { id: ScrollSwitchPref; label: string }[] = [
+  { id: 'on', label: 'On' },
+  { id: 'off', label: 'Off' },
+]
+
 /** Kept in sync with the pre-paint script in nuxt.config.ts. */
 export const PREFS_STORAGE_KEY = 'peteyplan-prefs'
 
-const DEFAULTS: Preferences = { theme: 'system', motion: 'normal', density: 'comfortable', surface: 'glass', elasticity: 'normal' }
+const DEFAULTS: Preferences = { theme: 'system', motion: 'normal', density: 'comfortable', surface: 'glass', elasticity: 'normal', scrollSwitch: 'on' }
 
 function pick<T extends string>(value: unknown, options: { id: T }[], fallback: T): T {
   return options.some((option) => option.id === value) ? value as T : fallback
@@ -69,6 +77,7 @@ function readStored(): Preferences {
       density: pick(raw.density, DENSITY_OPTIONS, DEFAULTS.density),
       surface: pick(raw.surface, SURFACE_OPTIONS, DEFAULTS.surface),
       elasticity: pick(raw.elasticity, ELASTICITY_OPTIONS, DEFAULTS.elasticity),
+      scrollSwitch: pick(raw.scrollSwitch, SCROLL_SWITCH_OPTIONS, DEFAULTS.scrollSwitch),
     }
   } catch {
     return { ...DEFAULTS }

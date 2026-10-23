@@ -123,7 +123,7 @@ docker compose build --no-cache --progress=plain 2>&1 | tail -40
 <details>
 <summary><strong><code>apt-get</code> fails with exit code 100</strong></summary>
 
-This only happens with the [git override](#git-integration) (`docker-compose.git.yml`). That's the one build that installs git, ssh and ca-certificates from the Debian mirrors (`deb.debian.org`) for the **Code** panel. The plain `docker compose up -d --build` doesn't use apt, so it can't hit this. Exit code 100 means apt couldn't download or verify the packages. It isn't specific to x64, Apple silicon or Windows. Look for one of these just above the error:
+This only happens with the [git override](#git-integration) (`docker-compose.git.yml`). That's the one build that installs git, ssh and ca-certificates from the Debian mirrors (`deb.debian.org`) for the **Code** view. The plain `docker compose up -d --build` doesn't use apt, so it can't hit this. Exit code 100 means apt couldn't download or verify the packages. It isn't specific to x64, Apple silicon or Windows. Look for one of these just above the error:
 
 | Message | Cause | Fix |
 | ------- | ----- | --- |
@@ -187,26 +187,38 @@ Something else is listening on 3000. Run PeteyPlan on another port (see [Run on 
 - **Pull requests**: paste PR links into a card's dialog (GitHub, GitLab, Bitbucket, Azure DevOps or any link). They show as `#123` chips on the card that open the PR, and as a count on the card's row in its release. Search finds cards by PR number or repo.
 - **Checklists** inside cards: tick items on the card, quick-add from the card footer, or edit and reorder them in the card dialog.
 - Work types with their own progress stages, shown as a stage track. Hover a segment to see the stage, click to set it. Development task, Chore and Managing someone come built in. Rename, reorder, add or remove types and their stages under **Settings → Work types**. Every type runs from Todo to Done; cards on a removed stage step back to the one before it, and cards of a removed type move to the first type.
-- **Releases** group cards into a weekly release with preprod and prod Jira tickets. A release is shared by every board by default, so it can collect cards from all of them, or it can be pinned to one board. Drag cards onto a folder or pick one with the **Release** selector in the card dialog. Each folder shows its progress, flags **Past due** once prod go-live has passed, and keeps cards even after they archive. **Mark done** moves it to the **Done** tab and locks its cards, and can optionally mark every unfinished card Done too. **Reopen** brings it back.
-- **Code**: link one or more local project folders to a board, then see its branch, pending changes and unpushed commits from the top bar. Click the branch to switch, check out a remote branch, create a new one, or fetch. Pick folders with **Browse…** (on Windows this lists your drives and WSL distros). **Commit & push** stages everything and pushes in one click, and **Discard…** throws away local edits, with a checkbox for also deleting new untracked files. See [Git integration](#git-integration).
+- **Releases** group cards into a weekly release with preprod and prod Jira tickets. A release is shared by every board by default, so it can collect cards from all of them, or it can be pinned to one board. Switch to **Releases** in the top bar to see every folder full-screen. To add a card, hold it over the **Releases** tab while dragging and drop it on a folder, or pick one with the **Release** selector in the card dialog. Each folder shows its progress, flags **Past due** once prod go-live has passed, and keeps cards even after they archive. **Mark done** moves it to the **Done** tab and locks its cards, and can optionally mark every unfinished card Done too. **Reopen** brings it back.
+- **Code**: link one or more local project folders to a board, then switch to **Code** in the top bar to see each one's branch, changed files and unpushed commits. Click the branch to switch, check out a remote branch, create a new one, or fetch. When the branch is behind its remote, click **N behind** to pull. It only fast-forwards, so if both sides have new commits it stops and leaves the merge to you. Add folders with **+ → Link repo**: the folder browser tags git repos and marks the ones already linked (on Windows it lists your drives and WSL distros). **Commit & push** stages everything and pushes in one click, and **Discard…** throws away local edits, with a checkbox for also deleting new untracked files. See [Git integration](#git-integration).
 - Soft-delete to an archive you can restore from. An unread dot marks cards nobody has opened yet.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="docs/screenshot-releases-light.png">
+    <img src="docs/screenshot-releases-dark.png" alt="The Releases view with three upcoming release folders and their cards" width="49%">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="docs/screenshot-code-light.png">
+    <img src="docs/screenshot-code-dark.png" alt="The Code view with three linked repos showing branches, changed files and a commit form" width="49%">
+  </picture>
+</p>
 
 **Built for speed**
 - Add cards inline at the bottom of a column: type, press <kbd>Enter</kbd>, keep going.
+- The **+** beside search follows the view: a card, column or board on **Cards**, a release on **Releases**, and a linked repo on **Code**.
 - Press <kbd>⌘K</kbd> on Mac, <kbd>Ctrl</kbd>+<kbd>K</kbd> elsewhere, or <kbd>/</kbd> to open the command palette. It searches cards on every board (archived ones too) by title, ref, description, Jira key, column, stage or checklist item. It also finds boards and columns, and runs actions such as new card, new column, archive, releases, theme and settings. Pick **Filter this board** to keep only matching cards on screen, and clear the filter from the chip in the top bar.
 - Jira keys like `CX-1831` link straight to the issue wherever they appear.
 
 **Looks the way you like**
 - Frosted-glass interface themed by the active board: its colour lights the backdrop and tints the buttons, links, progress, logo and tab icon (shades are adjusted automatically so text stays readable).
 - Switching boards is a quick slide that takes about 100ms however many boards it passes.
-- **Settings → Appearance**: Day, Night or System theme (or the sun/moon button), Glass or Solid surfaces, transition speed, and comfortable or compact density. Respects your OS reduced-motion and reduced-transparency settings.
+- **Settings → Appearance**: Day, Night or System theme (or the sun/moon button), Glass or Solid surfaces, transition speed, whether scrolling past the first or last column switches boards, and comfortable or compact density. Respects your OS reduced-motion and reduced-transparency settings.
 
 ## Git integration
 
-The **Code** panel runs the `git` installed on the machine that runs the PeteyPlan server. It uses your own git config and credentials, never prompts, and only touches folders you've linked.
+The **Code** view runs the `git` installed on the machine that runs the PeteyPlan server. It uses your own git config and credentials, never prompts, and only touches folders you've linked.
 
 - **Running directly** (`npm run dev`, or `npm run build && node .output/server/index.mjs`) works out of the box: link any folder on your machine.
-- **Windows**: Git for Windows handles normal folders. Folders inside WSL (`\\wsl.localhost\<distro>\…`, listed under **WSL** in **Browse…**) run the distro's own git through `wsl.exe`, so they use your Linux git config and SSH keys.
+- **Windows**: Git for Windows handles normal folders. Folders inside WSL (`\\wsl.localhost\<distro>\…`, listed under **WSL** in the folder browser) run the distro's own git through `wsl.exe`, so they use your Linux git config and SSH keys.
 - **Docker** can't see your folders by default. Start it with the git override, which mounts your home directory (or `CODE_DIR` from `.env.example`) at the same path plus `~/.ssh`, `~/.gitconfig` and `~/.git-credentials` (read-only), and binds the app to `127.0.0.1` only:
 
   ```bash
@@ -215,7 +227,7 @@ The **Code** panel runs the `git` installed on the machine that runs the PeteyPl
 
   Only this override installs git into the image, so the plain `docker compose up` never needs the Debian package mirrors. If that build fails at `apt-get` with exit code 100, see [Troubleshooting the Docker build](#troubleshooting-the-docker-build).
 
-  HTTPS remotes use the mounted `~/.git-credentials` (your name/email come along too; host-only settings like the `gh` credential helper or a proxy are ignored). SSH remotes work with keys that have no passphrase. **Browse…** starts at your home directory.
+  HTTPS remotes use the mounted `~/.git-credentials` (your name/email come along too; host-only settings like the `gh` credential helper or a proxy are ignored). SSH remotes work with keys that have no passphrase. The folder browser starts at your home directory.
 
   Behind an intercepting corporate proxy the plain-HTTP Debian mirrors fail. Drop the proxy's CA as `.corp-ca.pem` (gitignored, never committed) and rebuild — the image then installs git over HTTPS:
 
@@ -224,7 +236,7 @@ The **Code** panel runs the `git` installed on the machine that runs the PeteyPl
   docker compose -f docker-compose.yml -f docker-compose.git.yml up -d --build
   ```
 
-Commit & push, Push and Discard act on your real working copy. Anyone who can reach the app can use them, so don't expose PeteyPlan beyond your own machine while folders are linked. Unlinking a folder never touches its files.
+Commit & push, Push, Pull and Discard act on your real working copy. Anyone who can reach the app can use them, so don't expose PeteyPlan beyond your own machine while folders are linked. Unlinking a folder never touches its files.
 
 ## MCP server
 

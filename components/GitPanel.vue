@@ -60,7 +60,7 @@ const git = ref<{ available: boolean; version: string | null } | null>(null)
 const repos = ref<Repo[]>([])
 const loaded = ref(false)
 const refreshing = ref(false)
-type Action = 'commit' | 'push' | 'discard' | 'refresh' | 'switch' | 'fetch'
+type Action = 'commit' | 'push' | 'pull' | 'discard' | 'refresh' | 'switch' | 'fetch'
 const busy = ref<Record<string, Action | undefined>>({})
 const messages = ref<Record<string, string>>({})
 const repoErrors = ref<Record<string, string>>({})
@@ -141,6 +141,10 @@ async function commitAndPush(repo: Repo) {
 
 function push(repo: Repo) {
   return runAction(repo, 'push', () => call<Repo>(`/api/repos/${repo.id}/push`, { method: 'POST' }))
+}
+
+function pull(repo: Repo) {
+  return runAction(repo, 'pull', () => call<Repo>(`/api/repos/${repo.id}/pull`, { method: 'POST' }))
 }
 
 function refreshRepo(repo: Repo) {
@@ -476,7 +480,16 @@ onBeforeUnmount(() => {
             <PhCaretDown :size="10" weight="bold" aria-hidden="true" />
           </button>
           <span v-if="repo.status.ahead" class="code-sync code-ahead" :title="repo.status.ahead + ' commit(s) not pushed'"><PhArrowUp :size="11" weight="bold" aria-hidden="true" />{{ repo.status.ahead }} to push</span>
-          <span v-if="repo.status.behind" class="code-sync code-behind" :title="'On the remote you don\'t have, as of the last fetch'"><PhArrowDown :size="11" weight="bold" aria-hidden="true" />{{ repo.status.behind }} behind</span>
+          <button
+            v-if="repo.status.behind"
+            type="button"
+            class="code-sync code-behind code-pull"
+            :disabled="!!busy[repo.id] || !repo.status.upstream"
+            :title="'Pull ' + repo.status.behind + ' commit' + (repo.status.behind === 1 ? '' : 's') + ' from ' + repo.status.upstream + ' (fast-forward only)'"
+            @click="pull(repo)"
+          >
+            <PhArrowDown :size="11" weight="bold" aria-hidden="true" />{{ busy[repo.id] === 'pull' ? 'Pulling…' : repo.status.behind + ' behind' }}
+          </button>
           <span class="spacer"></span>
           <span v-for="chip in changeChips(repo.status)" :key="chip.code" class="code-chip" :data-code="chip.code" :title="chip.title">{{ chip.label }}</span>
           <span v-if="!repo.status.files.length" class="code-chip code-chip-clean"><PhCheck :size="11" weight="bold" aria-hidden="true" />Clean</span>
