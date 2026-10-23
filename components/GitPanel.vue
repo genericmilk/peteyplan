@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { confirmDialog, requestDialogClose, vModal } from '~/composables/useModal'
+import { vDismiss } from '~/composables/useDropdown'
 import {
   PhArrowUp,
   PhArrowsClockwise,
   PhCaretDown,
-  PhCaretRight,
+  PhArrowDown,
   PhCheck,
+  PhCheckCircle,
   PhCloud,
   PhCloudArrowDown,
   PhCloudArrowUp,
@@ -15,6 +17,7 @@ import {
   PhFolderOpen,
   PhFolderSimplePlus,
   PhGitBranch,
+  PhGitCommit,
   PhHardDrives,
   PhHouse,
   PhLinuxLogo,
@@ -61,8 +64,7 @@ type Action = 'commit' | 'push' | 'discard' | 'refresh' | 'switch' | 'fetch'
 const busy = ref<Record<string, Action | undefined>>({})
 const messages = ref<Record<string, string>>({})
 const repoErrors = ref<Record<string, string>>({})
-const expanded = ref(new Set<string>())
-const linkPath = ref('')
+const browseOpen = ref(false)
 const linkError = ref('')
 const linking = ref(false)
 let request = 0
@@ -159,8 +161,8 @@ async function unlink(repo: Repo) {
   }
 }
 
-async function link(chosen?: string) {
-  const folder = (chosen ?? linkPath.value).trim()
+async function link(chosen: string) {
+  const folder = chosen.trim()
   if (!folder || linking.value) return
   linking.value = true
   linkError.value = ''
@@ -171,7 +173,6 @@ async function link(chosen?: string) {
     })
     if (!repos.value.some((entry) => entry.id === repo.id)) repos.value = [...repos.value, repo]
     else replaceRepo(repo)
-    linkPath.value = ''
     browseEl.value?.close()
   } catch (err) {
     linkError.value = err instanceof Error ? err.message : 'Could not link that folder'
@@ -180,10 +181,23 @@ async function link(chosen?: string) {
   }
 }
 
-function toggleFiles(id: string) {
-  const next = new Set(expanded.value)
-  if (!next.delete(id)) next.add(id)
-  expanded.value = next
+/** Paths match ignoring trailing slashes and case, so Windows and WSL paths compare too. */
+function samePath(a: string | null | undefined, b: string | null | undefined): boolean {
+  const norm = (p: string) => p.replace(/[\\/]+$/, '').toLowerCase()
+  return !!a && !!b && norm(a) === norm(b)
+}
+
+function isLinked(folder: string): boolean {
+  return repos.value.some((repo) => samePath(repo.path, folder))
+}
+
+function baseName(file: string): string {
+  return file.split('/').pop() || file
+}
+
+function dirName(file: string): string {
+  const at = file.lastIndexOf('/')
+  return at > 0 ? file.slice(0, at) : ''
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -196,9 +210,17 @@ function fileCode(file: GitFile): string {
   return file.worktree !== '.' ? file.worktree : file.index
 }
 
-function changeSummary(status: GitStatus): string {
-  const n = status.files.length
-  return n ? `${n} change${n === 1 ? '' : 's'}` : 'Clean'
+/** One chip per kind of change, e.g. "3 modified", "1 new". */
+function changeChips(status: GitStatus): { code: string; label: string; title: string }[] {
+  const counts = new Map<string, number>()
+  for (const file of status.files) {
+    const code = fileCode(file)
+    counts.set(code, (counts.get(code) ?? 0) + 1)
+  }
+  return [...counts].map(([code, n]) => {
+    const name = (STATUS_LABELS[code] ?? 'Changed').toLowerCase().replace('new file', 'new')
+    return { code, label: `${n} ${name}`, title: `${n} ${STATUS_LABELS[code] ?? 'changed'}` }
+  })
 }
 
 /* ── Discard confirm ───────────────────────────────────────────────────────── */
@@ -334,10 +356,13 @@ async function browseTo(target: string) {
 
 async function openBrowser() {
   linkError.value = ''
+  browseOpen.value = true
   browseEl.value?.showModal()
-  // Start where you left off, else from what's typed, else home.
-  await browseTo(listing.value?.path ?? linkPath.value.trim())
+  // Start where you left off, else home.
+  await browseTo(listing.value?.path ?? '')
 }
+
+defineExpose({ openBrowser })
 
 /** The most specific place containing the folder being shown, to highlight it. */
 const activeRoot = computed(() => {
@@ -393,13 +418,18 @@ onBeforeUnmount(() => {
           Local folders linked to {{ boardName }}. Commit &amp; push sends every change to the branch's remote.
         </p>
       </div>
-      <button
-        type="button"
-        class="btn"
-        :disabled="refreshing"
-        title="Check every folder again"
-        @click="refresh"
-      ><PhArrowsClockwise :size="15" :class="{ spinning: refreshing }" aria-hidden="true" />Refresh</button>
+      <div class="code-header-actions">
+        <button
+          type="button"
+          class="btn"
+          :disabled="refreshing"
+          title="Check every folder again"
+          @click="refresh"
+        ><PhArrowsClockwise :size="15" :class="{ spinning: refreshing }" aria-hidden="true" />Refresh</button>
+        <button v-if="git?.available !== false" type="button" class="btn btn-primary" @click="openBrowser">
+          <PhFolderSimplePlus :size="15" aria-hidden="true" />Link repo
+        </button>
+      </div>
     </div>
 
     <div v-if="git && !git.available" class="code-unavailable">
@@ -410,44 +440,15 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-else class="code-repos">
+      <p v-if="linkError && !browseOpen" class="code-repo-error" role="alert">{{ linkError }}</p>
+
       <article v-for="repo in repos" :key="repo.id" class="code-repo" :class="{ attention: needsAttention(repo.status) }">
-        <div class="code-repo-head">
+        <header class="code-repo-head">
+          <span class="code-repo-icon" aria-hidden="true"><PhFolderOpen :size="18" /></span>
           <div class="code-repo-name">
             <h3 :title="repo.path">{{ repo.name }}</h3>
-            <span class="code-repo-path">{{ repo.path }}</span>
+            <span class="code-repo-path" :title="repo.path">{{ repo.path }}</span>
           </div>
-          <template v-if="repo.status">
-            <button
-              type="button"
-              class="code-branch"
-              :class="{ open: branchMenu?.repoId === repo.id }"
-              :disabled="!!busy[repo.id]"
-              aria-haspopup="dialog"
-              :aria-expanded="branchMenu?.repoId === repo.id"
-              :title="'Switch branch' + (repo.status.upstream ? ' · tracking ' + repo.status.upstream : ' · no upstream yet, Push sets one')"
-              @click="openBranchMenu($event, repo)"
-            >
-              <PhGitBranch :size="13" aria-hidden="true" />{{ busy[repo.id] === 'switch' ? 'Switching…' : repo.status.branch ?? 'detached' }}
-              <span v-if="repo.status.ahead" class="code-ahead" :title="repo.status.ahead + ' commit(s) not pushed'">↑{{ repo.status.ahead }}</span>
-              <span v-if="repo.status.behind" class="code-behind" :title="repo.status.behind + ' commit(s) on the remote you don\'t have (as of the last fetch)'">↓{{ repo.status.behind }}</span>
-              <PhCaretDown :size="10" weight="bold" aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              class="code-changes"
-              :class="{ clean: !repo.status.files.length }"
-              :disabled="!repo.status.files.length"
-              :aria-expanded="expanded.has(repo.id)"
-              @click="toggleFiles(repo.id)"
-            >
-              <template v-if="repo.status.files.length">
-                <PhCaretDown v-if="expanded.has(repo.id)" :size="12" weight="bold" aria-hidden="true" />
-                <PhCaretRight v-else :size="12" weight="bold" aria-hidden="true" />
-              </template>
-              {{ changeSummary(repo.status) }}
-            </button>
-          </template>
-          <span class="spacer"></span>
           <button
             type="button"
             class="btn-icon"
@@ -456,84 +457,99 @@ onBeforeUnmount(() => {
             :disabled="!!busy[repo.id]"
             @click="refreshRepo(repo)"
           ><PhArrowsClockwise :size="15" :class="{ spinning: busy[repo.id] === 'refresh' }" /></button>
-          <button type="button" class="btn-icon" title="Unlink folder" aria-label="Unlink folder" @click="unlink(repo)"><PhLinkBreak :size="15" /></button>
+          <button type="button" class="btn-icon danger" title="Unlink folder" aria-label="Unlink folder" @click="unlink(repo)"><PhLinkBreak :size="15" /></button>
+        </header>
+
+        <div v-if="repo.status" class="code-repo-meta">
+          <button
+            type="button"
+            class="code-branch"
+            :class="{ open: branchMenu?.repoId === repo.id }"
+            :disabled="!!busy[repo.id]"
+            aria-haspopup="dialog"
+            :aria-expanded="branchMenu?.repoId === repo.id"
+            :title="'Switch branch' + (repo.status.upstream ? ' · tracking ' + repo.status.upstream : ' · no upstream yet, Push sets one')"
+            @click="openBranchMenu($event, repo)"
+          >
+            <PhGitBranch :size="13" aria-hidden="true" />
+            <span class="code-branch-label">{{ busy[repo.id] === 'switch' ? 'Switching…' : repo.status.branch ?? 'detached' }}</span>
+            <PhCaretDown :size="10" weight="bold" aria-hidden="true" />
+          </button>
+          <span v-if="repo.status.ahead" class="code-sync code-ahead" :title="repo.status.ahead + ' commit(s) not pushed'"><PhArrowUp :size="11" weight="bold" aria-hidden="true" />{{ repo.status.ahead }} to push</span>
+          <span v-if="repo.status.behind" class="code-sync code-behind" :title="'On the remote you don\'t have, as of the last fetch'"><PhArrowDown :size="11" weight="bold" aria-hidden="true" />{{ repo.status.behind }} behind</span>
+          <span class="spacer"></span>
+          <span v-for="chip in changeChips(repo.status)" :key="chip.code" class="code-chip" :data-code="chip.code" :title="chip.title">{{ chip.label }}</span>
+          <span v-if="!repo.status.files.length" class="code-chip code-chip-clean"><PhCheck :size="11" weight="bold" aria-hidden="true" />Clean</span>
         </div>
 
         <p v-if="repo.error" class="code-repo-error">{{ repo.error }}</p>
 
-        <ul v-if="repo.status && expanded.has(repo.id) && repo.status.files.length" class="code-files">
-          <li v-for="file in repo.status.files" :key="file.path">
+        <ul v-if="repo.status?.files.length" class="code-files">
+          <li v-for="file in repo.status.files" :key="file.path" :title="(file.from ? file.from + ' → ' : '') + file.path">
             <code class="code-file-status" :data-code="fileCode(file)" :title="STATUS_LABELS[fileCode(file)]">{{ fileCode(file) }}</code>
-            <span class="code-file-path" :title="file.path">
-              <template v-if="file.from">{{ file.from }} → </template>{{ file.path }}
+            <span class="code-file-name">{{ baseName(file.path) }}</span>
+            <span class="code-file-dir">
+              <template v-if="file.from">from {{ file.from }}</template>
+              <template v-else>{{ dirName(file.path) }}</template>
             </span>
           </li>
         </ul>
-
-        <form v-if="repo.status?.files.length" class="code-commit" @submit.prevent="commitAndPush(repo)">
-          <input
-            v-model="messages[repo.id]"
-            type="text"
-            maxlength="200"
-            placeholder="Commit message"
-            aria-label="Commit message"
-            autocomplete="off"
-            :disabled="!!busy[repo.id]"
-          />
-          <button
-            type="submit"
-            class="btn btn-primary"
-            :disabled="!!busy[repo.id] || !(messages[repo.id] || '').trim()"
-          ><PhCloudArrowUp :size="15" aria-hidden="true" />{{ busy[repo.id] === 'commit' ? 'Pushing…' : 'Commit & push' }}</button>
-          <button
-            type="button"
-            class="btn btn-danger"
-            :disabled="!!busy[repo.id]"
-            @click="confirmDiscard(repo)"
-          ><PhTrash :size="15" aria-hidden="true" />Discard…</button>
-        </form>
-        <div v-else-if="repo.status?.ahead" class="code-commit">
-          <span class="code-note">{{ repo.status.ahead }} commit{{ repo.status.ahead === 1 ? '' : 's' }} waiting to be pushed</span>
-          <button type="button" class="btn btn-primary" :disabled="!!busy[repo.id]" @click="push(repo)">
-            <PhCloudArrowUp :size="15" aria-hidden="true" />{{ busy[repo.id] === 'push' ? 'Pushing…' : 'Push' }}
-          </button>
+        <div v-else-if="repo.status" class="code-clean">
+          <PhCheckCircle :size="22" aria-hidden="true" />
+          <span>{{ repo.status.ahead ? 'Everything is committed' : 'Nothing to commit' }}</span>
         </div>
 
         <p v-if="repoErrors[repo.id]" class="code-repo-error" role="alert">{{ repoErrors[repo.id] }}</p>
-        <p v-if="repo.status?.lastCommit" class="code-last-commit">
-          Last commit <code>{{ repo.status.lastCommit.hash }}</code> {{ repo.status.lastCommit.subject }}
-        </p>
-        <p v-else-if="repo.status?.initial" class="code-last-commit">No commits yet</p>
+
+        <footer class="code-repo-foot">
+          <form v-if="repo.status?.files.length" class="code-commit" @submit.prevent="commitAndPush(repo)">
+            <input
+              v-model="messages[repo.id]"
+              type="text"
+              maxlength="200"
+              placeholder="Commit message"
+              aria-label="Commit message"
+              autocomplete="off"
+              :disabled="!!busy[repo.id]"
+            />
+            <button
+              type="button"
+              class="btn btn-danger"
+              :disabled="!!busy[repo.id]"
+              @click="confirmDiscard(repo)"
+            ><PhTrash :size="15" aria-hidden="true" />Discard…</button>
+            <button
+              type="submit"
+              class="btn btn-primary"
+              :disabled="!!busy[repo.id] || !(messages[repo.id] || '').trim()"
+            ><PhCloudArrowUp :size="15" aria-hidden="true" />{{ busy[repo.id] === 'commit' ? 'Pushing…' : 'Commit & push' }}</button>
+          </form>
+          <div v-else-if="repo.status?.ahead" class="code-commit">
+            <span class="code-note">{{ repo.status.ahead }} commit{{ repo.status.ahead === 1 ? '' : 's' }} waiting to be pushed</span>
+            <button type="button" class="btn btn-primary" :disabled="!!busy[repo.id]" @click="push(repo)">
+              <PhCloudArrowUp :size="15" aria-hidden="true" />{{ busy[repo.id] === 'push' ? 'Pushing…' : 'Push' }}
+            </button>
+          </div>
+          <p v-if="repo.status?.lastCommit" class="code-last-commit">
+            <PhGitCommit :size="13" aria-hidden="true" />
+            <code>{{ repo.status.lastCommit.hash }}</code>
+            <span>{{ repo.status.lastCommit.subject }}</span>
+          </p>
+          <p v-else-if="repo.status?.initial" class="code-last-commit">No commits yet</p>
+        </footer>
       </article>
 
-      <p v-if="loaded && repos.length === 0" class="releases-empty-state code-empty">
-        No folders linked to {{ boardName }} yet. Add a project folder below to see its changes here.
-      </p>
-
-      <form class="code-link" @submit.prevent="link">
-        <input
-          v-model="linkPath"
-          type="text"
-          placeholder="/Users/you/Projects/my-app"
-          aria-label="Absolute path to a project folder"
-          autocomplete="off"
-          spellcheck="false"
-          :disabled="linking"
-        />
-        <button type="button" class="btn" :disabled="linking" @click="openBrowser">
-          <PhFolderOpen :size="15" aria-hidden="true" />Browse…
-        </button>
-        <button type="submit" class="btn" :disabled="linking || !linkPath.trim()">
-          <PhFolderSimplePlus :size="15" aria-hidden="true" />Link folder
-        </button>
-      </form>
-      <p v-if="linkError" class="code-repo-error" role="alert">{{ linkError }}</p>
+      <div v-if="loaded && repos.length === 0" class="releases-empty-state code-empty">
+        <span>No repos linked to {{ boardName }} yet. Link a project folder to see its changes, switch branches and push from here.</span>
+        <button type="button" class="btn btn-primary" @click="openBrowser"><PhFolderSimplePlus :size="15" aria-hidden="true" />Link repo</button>
+      </div>
     </div>
 
     <Teleport to="body">
       <template v-if="branchMenu && branchRepo">
         <div class="release-new-backdrop" @click="closeBranchMenu"></div>
         <div
+          v-dismiss="closeBranchMenu"
           class="column-menu code-branch-menu"
           role="dialog"
           aria-label="Switch branch"
@@ -609,11 +625,18 @@ onBeforeUnmount(() => {
       </template>
     </Teleport>
 
-    <dialog ref="browseEl" v-modal="{ sizeKey: 'folders' }" class="folder-dialog" aria-labelledby="folder-dialog-title">
+    <dialog
+      ref="browseEl"
+      v-modal="{ sizeKey: 'folders' }"
+      class="folder-dialog"
+      aria-labelledby="folder-dialog-title"
+      @close="browseOpen = false"
+    >
       <div class="dialog-form">
-        <h2 id="folder-dialog-title">Choose a project folder</h2>
+        <h2 id="folder-dialog-title">Link a repo to {{ boardName }}</h2>
         <div class="folder-browser">
           <nav class="folder-roots" aria-label="Places">
+            <span class="folder-roots-heading">Places</span>
             <button
               v-for="root in localRoots"
               :key="root.path"
@@ -621,7 +644,7 @@ onBeforeUnmount(() => {
               :class="{ active: activeRoot === root.path }"
               :title="root.path"
               @click="browseTo(root.path)"
-            ><component :is="ROOT_ICONS[root.kind]" :size="15" aria-hidden="true" />{{ root.label }}</button>
+            ><component :is="ROOT_ICONS[root.kind]" :size="15" aria-hidden="true" /><span>{{ root.label }}</span></button>
             <template v-if="wslRoots.length">
               <span class="folder-roots-heading">WSL</span>
               <button
@@ -631,7 +654,19 @@ onBeforeUnmount(() => {
                 :class="{ active: activeRoot === root.path }"
                 :title="root.path"
                 @click="browseTo(root.path)"
-              ><PhLinuxLogo :size="15" aria-hidden="true" />{{ root.label }}</button>
+              ><PhLinuxLogo :size="15" aria-hidden="true" /><span>{{ root.label }}</span></button>
+            </template>
+            <template v-if="repos.length">
+              <span class="folder-roots-heading">Linked here</span>
+              <button
+                v-for="repo in repos"
+                :key="repo.id"
+                type="button"
+                class="folder-root-linked"
+                :class="{ active: samePath(listing?.path, repo.path) }"
+                :title="repo.path"
+                @click="browseTo(repo.path)"
+              ><PhCheckCircle :size="15" weight="fill" aria-hidden="true" /><span>{{ repo.name }}</span></button>
             </template>
           </nav>
           <div class="folder-main">
@@ -644,16 +679,22 @@ onBeforeUnmount(() => {
                 :disabled="!listing?.parent || browsing"
                 @click="listing?.parent && browseTo(listing.parent)"
               ><PhArrowUp :size="15" /></button>
-              <input v-model="browsePath" type="text" aria-label="Folder path" spellcheck="false" autocomplete="off" />
+              <input v-model="browsePath" type="text" aria-label="Folder path, press Enter to go there" placeholder="Type a path and press Enter" spellcheck="false" autocomplete="off" />
             </form>
             <ul class="folder-list" :aria-busy="browsing">
-              <li v-for="folder in listing?.folders ?? []" :key="folder.path" :class="{ repo: folder.repo }">
+              <li
+                v-for="folder in listing?.folders ?? []"
+                :key="folder.path"
+                :class="{ repo: folder.repo, linked: isLinked(folder.path) }"
+              >
                 <button type="button" class="folder-open" :title="folder.path" @click="browseTo(folder.path)">
-                  <PhGitBranch v-if="folder.repo" :size="15" aria-hidden="true" />
-                  <PhFolder v-else :size="15" aria-hidden="true" />
-                  <span>{{ folder.name }}</span>
+                  <PhGitBranch v-if="folder.repo" :size="16" aria-hidden="true" />
+                  <PhFolder v-else :size="16" aria-hidden="true" />
+                  <span class="folder-name">{{ folder.name }}</span>
+                  <span v-if="folder.repo && !isLinked(folder.path)" class="folder-tag">Git repo</span>
                 </button>
-                <button v-if="folder.repo" type="button" class="btn folder-link" :disabled="linking" @click="link(folder.path)">Link</button>
+                <span v-if="isLinked(folder.path)" class="folder-linked-tag"><PhCheck :size="12" weight="bold" aria-hidden="true" />Linked</span>
+                <button v-else-if="folder.repo" type="button" class="btn folder-link" :disabled="linking" @click="link(folder.path)">Link</button>
               </li>
               <li v-if="listing && !listing.folders.length" class="folder-empty">No folders here</li>
               <li v-if="listing?.truncated" class="folder-empty">Showing the first {{ listing.folders.length }} folders. Type a path to go deeper.</li>
@@ -662,16 +703,17 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="dialog-actions">
-          <span class="folder-status">
-            <template v-if="listing?.repo"><PhGitBranch :size="13" aria-hidden="true" />This folder is a git repository</template>
-            <template v-else>Folders with <PhGitBranch :size="13" aria-label="git" /> are repositories</template>
+          <span class="folder-status" :class="{ 'folder-status-linked': listing && isLinked(listing.path) }">
+            <template v-if="listing && isLinked(listing.path)"><PhCheckCircle :size="14" weight="fill" aria-hidden="true" />Already linked to {{ boardName }}</template>
+            <template v-else-if="listing?.repo"><PhGitBranch :size="13" aria-hidden="true" />This folder is a git repo</template>
+            <template v-else>Open a folder marked <PhGitBranch :size="13" aria-label="git" /> to link it</template>
           </span>
           <span class="spacer"></span>
           <button type="button" class="btn" @click="requestDialogClose(browseEl)">Cancel</button>
           <button
             type="button"
             class="btn btn-primary"
-            :disabled="!listing || linking"
+            :disabled="!listing || linking || isLinked(listing.path)"
             :title="listing?.repo ? undefined : 'Links the repository this folder belongs to'"
             @click="listing && link(listing.path)"
           ><PhFolderSimplePlus :size="15" aria-hidden="true" />Link this folder</button>
