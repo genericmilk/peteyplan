@@ -668,6 +668,19 @@ function releaseTitleForCard(card: Card): string | null {
 
 const releasesPanel = ref<InstanceType<typeof ReleasesPanel> | null>(null)
 
+/** Top-bar + menu */
+const newMenuOpen = ref(false)
+
+function newFromMenu(kind: 'card' | 'column' | 'board') {
+  newMenuOpen.value = false
+  if (kind === 'board') return openSettings('boards')
+  // Cards and columns land on the board, so show it.
+  view.value = 'cards'
+  const first = board.value.columns[0]
+  if (kind === 'card' && first) openCardDialog(first.id, null)
+  else if (kind === 'column') openColumnDialog(null)
+}
+
 function showView(next: AppView) {
   cancelViewHover()
   view.value = next
@@ -2917,6 +2930,35 @@ onBeforeUnmount(() => {
         <span class="filter-chip-text">{{ searchQuery.trim() }}</span>
         <button type="button" :aria-label="'Clear filter ' + searchQuery.trim()" title="Clear filter" @click="searchQuery = ''"><PhX :size="12" weight="bold" /></button>
       </span>
+      <div class="release-new topbar-new">
+        <button
+          type="button"
+          class="btn btn-primary btn-square"
+          title="New card, column or board"
+          aria-label="New card, column or board"
+          aria-haspopup="menu"
+          :aria-expanded="newMenuOpen"
+          :disabled="loading || !!switchingBoardId"
+          @click="newMenuOpen = !newMenuOpen"
+        ><PhPlus :size="16" weight="bold" aria-hidden="true" /></button>
+        <template v-if="newMenuOpen">
+          <div class="release-new-backdrop" @click="newMenuOpen = false"></div>
+          <div class="column-menu release-new-menu topbar-new-menu" role="menu" @keydown.esc="newMenuOpen = false">
+            <button type="button" role="menuitem" :disabled="!board.columns.length" @click="newFromMenu('card')">
+              <PhCards :size="15" />
+              <span>Card<small>{{ board.columns[0] ? 'In ' + board.columns[0].title : 'Add a column first' }}</small></span>
+            </button>
+            <button type="button" role="menuitem" @click="newFromMenu('column')">
+              <PhColumns :size="15" />
+              <span>Column<small>On {{ activeBoard?.name ?? 'this board' }}</small></span>
+            </button>
+            <button type="button" role="menuitem" @click="newFromMenu('board')">
+              <PhSquaresFour :size="15" />
+              <span>Board<small>Start a fresh board</small></span>
+            </button>
+          </div>
+        </template>
+      </div>
       <button type="button" class="topbar-search palette-trigger" :aria-keyshortcuts="paletteShortcut === '⌘K' ? 'Meta+K' : 'Control+K'" @click="openPalette">
         <PhMagnifyingGlass :size="15" aria-hidden="true" />
         <span class="palette-trigger-text">Search or jump to…</span>
@@ -2951,7 +2993,6 @@ onBeforeUnmount(() => {
           @click="showView('code')"
         ><PhGitBranch :size="15" aria-hidden="true" /><span class="view-switch-label">Code</span><span v-if="codeAttention" class="btn-badge">{{ codeAttention }}</span></button>
       </div>
-      <button v-if="view === 'cards'" class="btn btn-primary" :disabled="loading || !!switchingBoardId" @click="openColumnDialog(null)"><PhPlus :size="15" weight="bold" aria-hidden="true" />Column</button>
       <button
         type="button"
         class="btn-icon theme-toggle"
