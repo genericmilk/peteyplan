@@ -3042,6 +3042,9 @@ dialog.confirm-dialog { width: min(420px, calc(100vw - 32px)); }
 
 /* ── Views: Cards / Releases / Code ─────────────────────────────────────── */
 
+.btn.btn-square { width: 36px; padding: 0; }
+.column-menu.topbar-new-menu { position: absolute; top: calc(100% + 6px); right: auto; left: 0; transform-origin: top left; }
+
 .view-switch { flex-wrap: nowrap; }
 .view-switch button {
   display: inline-flex;
