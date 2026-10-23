@@ -9,6 +9,13 @@ export type SurfacePref = 'glass' | 'solid'
 export type ElasticityPref = 'loose' | 'normal' | 'firm' | 'none'
 export type ScrollSwitchPref = 'on' | 'off'
 
+export interface CodeEditor {
+  id: string
+  name: string
+  /** URL with `{path}` where the file's absolute path goes */
+  url: string
+}
+
 export interface Preferences {
   theme: ThemePref
   motion: MotionPref
@@ -17,6 +24,9 @@ export interface Preferences {
   elasticity: ElasticityPref
   /** Scrolling past a board's edge moves to the next board */
   scrollSwitch: ScrollSwitchPref
+  /** Editors a changed file on the Code view can open in (Settings → Editors) */
+  editors: CodeEditor[]
+  defaultEditor: string | null
 }
 
 export const THEME_OPTIONS: { id: ThemePref; label: string }[] = [
@@ -62,10 +72,17 @@ export const SCROLL_SWITCH_OPTIONS: { id: ScrollSwitchPref; label: string }[] = 
 /** Kept in sync with the pre-paint script in nuxt.config.ts. */
 export const PREFS_STORAGE_KEY = 'peteyplan-prefs'
 
-const DEFAULTS: Preferences = { theme: 'system', motion: 'normal', density: 'comfortable', surface: 'glass', elasticity: 'normal', scrollSwitch: 'on' }
+const DEFAULTS: Preferences = { theme: 'system', motion: 'normal', density: 'comfortable', surface: 'glass', elasticity: 'normal', scrollSwitch: 'on', editors: [], defaultEditor: null }
 
 function pick<T extends string>(value: unknown, options: { id: T }[], fallback: T): T {
   return options.some((option) => option.id === value) ? value as T : fallback
+}
+
+function pickEditors(value: unknown): CodeEditor[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((entry) => entry && typeof entry.id === 'string' && typeof entry.name === 'string' && typeof entry.url === 'string')
+    .map((entry) => ({ id: entry.id, name: entry.name, url: entry.url }))
 }
 
 function readStored(): Preferences {
@@ -78,13 +95,15 @@ function readStored(): Preferences {
       surface: pick(raw.surface, SURFACE_OPTIONS, DEFAULTS.surface),
       elasticity: pick(raw.elasticity, ELASTICITY_OPTIONS, DEFAULTS.elasticity),
       scrollSwitch: pick(raw.scrollSwitch, SCROLL_SWITCH_OPTIONS, DEFAULTS.scrollSwitch),
+      editors: pickEditors(raw.editors),
+      defaultEditor: typeof raw.defaultEditor === 'string' ? raw.defaultEditor : null,
     }
   } catch {
-    return { ...DEFAULTS }
+    return { ...DEFAULTS, editors: [] }
   }
 }
 
-const prefs = ref<Preferences>({ ...DEFAULTS })
+const prefs = ref<Preferences>({ ...DEFAULTS, editors: [] })
 const systemDark = ref(true)
 const systemReducedMotion = ref(false)
 let initialized = false

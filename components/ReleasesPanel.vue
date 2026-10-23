@@ -8,12 +8,10 @@ import {
   PhGitPullRequest,
   PhGlobeSimple,
   PhPencilSimple,
-  PhPlus,
   PhX,
 } from '@phosphor-icons/vue'
 import { kindDef, normalizeKind, normalizeProgress } from '~/shared/progress'
 import { requestDialogClose, vModal } from '~/composables/useModal'
-import { menuPosition, vDismiss } from '~/composables/useDropdown'
 
 export interface ReleaseCardView {
   id: string
@@ -55,7 +53,6 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  create: [boardScope: string | null]
   edit: [releaseId: string]
   setDone: [releaseId: string, done: boolean, completeCards: boolean]
   openCard: [card: ReleaseCardView]
@@ -66,12 +63,10 @@ const emit = defineEmits<{
 }>()
 
 const tab = ref<'open' | 'done'>('open')
-const newMenu = ref<{ top: number; right: number } | null>(null)
 const expanded = ref(new Set<string>())
 
 const openReleases = computed(() => props.releases.filter((rel) => !rel.doneAt))
 const doneReleases = computed(() => props.releases.filter((rel) => rel.doneAt))
-const activeBoard = computed(() => props.boards.find((board) => board.id === props.activeBoardId))
 
 function boardOf(id: string | null) {
   return id ? props.boards.find((board) => board.id === id) : undefined
@@ -124,16 +119,6 @@ function toggleExpanded(id: string) {
   const next = new Set(expanded.value)
   if (!next.delete(id)) next.add(id)
   expanded.value = next
-}
-
-function toggleNewMenu(event: MouseEvent) {
-  newMenu.value = newMenu.value ? null : menuPosition(event.currentTarget as Element, 'right') as { top: number; right: number }
-}
-
-function create(scope: string | null) {
-  newMenu.value = null
-  tab.value = 'open'
-  emit('create', scope)
 }
 
 /* ── Mark done confirm ─────────────────────────────────────────────────────── */
@@ -190,33 +175,6 @@ defineExpose({ confirmDone, showTab: (next: 'open' | 'done') => { tab.value = ne
           <template v-if="tab === 'open'">Hold a dragged card over the Releases tab to bring it here, then drop it on a folder. Preprod update {{ preprodHint }} · Prod go-live {{ prodHint }}</template>
           <template v-else>Shipped releases, newest first. Reopen one to change its cards.</template>
         </p>
-      </div>
-      <div class="release-new">
-        <button
-          class="btn btn-primary"
-          type="button"
-          :aria-expanded="!!newMenu"
-          aria-haspopup="menu"
-          @click="toggleNewMenu"
-        ><PhPlus :size="15" weight="bold" aria-hidden="true" />New release<PhCaretDown :size="12" weight="bold" aria-hidden="true" /></button>
-        <Teleport v-if="newMenu" to="body">
-          <div class="release-new-backdrop" @click="newMenu = null"></div>
-          <div
-            v-dismiss="() => { newMenu = null }"
-            class="column-menu release-new-menu"
-            role="menu"
-            :style="{ top: newMenu.top + 'px', right: newMenu.right + 'px' }"
-          >
-            <button type="button" role="menuitem" @click="create(null)">
-              <PhGlobeSimple :size="15" />
-              <span>For all boards<small>Cards from any board can join</small></span>
-            </button>
-            <button v-if="activeBoard" type="button" role="menuitem" @click="create(activeBoard.id)">
-              <span class="release-new-emoji" aria-hidden="true">{{ activeBoard.emoji }}</span>
-              <span>Only {{ activeBoard.name }}<small>Just this board's cards</small></span>
-            </button>
-          </div>
-        </Teleport>
       </div>
     </div>
 
@@ -340,7 +298,7 @@ defineExpose({ confirmDone, showTab: (next: 'open' | 'done') => { tab.value = ne
         </ul>
       </article>
       <div v-if="openReleases.length === 0" class="releases-empty-state">
-        No upcoming releases. Create one for the next Monday / Tuesday window.
+        No upcoming releases. Use + at the top to create one for the next Monday / Tuesday window.
       </div>
     </div>
 

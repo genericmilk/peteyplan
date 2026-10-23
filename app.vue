@@ -87,7 +87,9 @@ import {
   THEME_OPTIONS,
   initPreferences,
   usePreferences,
+  type CodeEditor,
 } from '~/composables/usePreferences'
+import { EDITOR_PRESETS, editorUrlProblem } from '~/composables/useEditors'
 
 interface Card {
   id: string
@@ -690,6 +692,8 @@ function toggleNewMenu(event: MouseEvent) {
 
 function newRelease(boardScope: string | null) {
   newMenu.value = null
+  // The new release lands under Upcoming, so make sure that's what's showing.
+  releasesPanel.value?.showTab('open')
   void addRelease(boardScope)
 }
 
@@ -2302,7 +2306,7 @@ const settingsDialogEl = ref<HTMLDialogElement | null>(null)
 const boardDrafts = ref<BoardInfo[]>([])
 const newBoard = ref({ name: '', emoji: '📋', color: '#5b8cff' })
 const settingsBusy = ref(false)
-const settingsTab = ref<'appearance' | 'boards' | 'types'>('appearance')
+const settingsTab = ref<'appearance' | 'boards' | 'types' | 'editors'>('appearance')
 
 const dialogSizesReset = ref(false)
 function onResetDialogSizes() {
@@ -2314,7 +2318,24 @@ function onResetDialogSizes() {
   setTimeout(() => { dialogSizesReset.value = false }, 1600)
 }
 
-function openSettings(tab: 'appearance' | 'boards' | 'types' = 'appearance') {
+const unusedEditorPresets = computed(() =>
+  EDITOR_PRESETS.filter((preset) => !prefs.value.editors.some((editor) => editor.id === preset.id))
+)
+
+function addEditor(preset?: CodeEditor) {
+  const editor = preset ? { ...preset } : { id: `custom-${Date.now().toString(36)}`, name: 'My editor', url: 'myeditor://open?file={path}' }
+  prefs.value.editors.push(editor)
+  if (!prefs.value.defaultEditor || !prefs.value.editors.some((entry) => entry.id === prefs.value.defaultEditor)) {
+    prefs.value.defaultEditor = editor.id
+  }
+}
+
+function removeEditor(id: string) {
+  prefs.value.editors = prefs.value.editors.filter((editor) => editor.id !== id)
+  if (prefs.value.defaultEditor === id) prefs.value.defaultEditor = prefs.value.editors[0]?.id ?? null
+}
+
+function openSettings(tab: 'appearance' | 'boards' | 'types' | 'editors' = 'appearance') {
   closeBoardMenu()
   settingsTab.value = tab
   boardDrafts.value = boards.value.map((entry) => ({ ...entry }))
@@ -3072,6 +3093,7 @@ onBeforeUnmount(() => {
     :board-name="activeBoard?.name ?? 'this board'"
     :open="view === 'code'"
     @attention="codeAttention = $event"
+    @configure-editors="openSettings('editors')"
   />
 
   <ReleasesPanel
@@ -3085,7 +3107,6 @@ onBeforeUnmount(() => {
     :jira-url="jiraBrowseUrl"
     :preprod-hint="PREPROD_HINT"
     :prod-hint="PROD_HINT"
-    @create="addRelease"
     @edit="openReleaseDialog"
     @set-done="setReleaseDone"
     @open-card="openReleaseCard"
@@ -3431,6 +3452,15 @@ onBeforeUnmount(() => {
           aria-controls="settings-panel-types"
           @click="settingsTab = 'types'"
         >Work types</button>
+        <button
+          id="settings-tab-editors"
+          type="button"
+          role="tab"
+          class="settings-tab"
+          :aria-selected="settingsTab === 'editors'"
+          aria-controls="settings-panel-editors"
+          @click="settingsTab = 'editors'"
+        >Editors</button>
       </div>
       <p v-if="error" class="settings-error" role="alert">{{ error }}</p>
 
@@ -3577,6 +3607,43 @@ onBeforeUnmount(() => {
           <label>Colour<input v-model="newBoard.color" aria-label="New board colour" type="color" required /></label>
           <button class="btn btn-primary" :disabled="settingsBusy" type="submit">Create board</button>
         </form>
+      </section>
+
+      <section
+        v-show="settingsTab === 'editors'"
+        id="settings-panel-editors"
+        role="tabpanel"
+        aria-labelledby="settings-tab-editors"
+        class="settings-panel"
+      >
+        <p class="settings-hint">
+          Click a repo's name or a changed file on the Code view to open it in your default editor. Files open through the editor's link scheme,
+          so the editor must be installed on this computer. <code>{path}</code> is replaced with the file's full path.
+        </p>
+        <div v-if="prefs.editors.length" class="editor-list" role="radiogroup" aria-label="Default editor">
+          <div v-for="editor in prefs.editors" :key="editor.id" class="editor-row">
+            <label class="editor-default" :title="'Open files in ' + editor.name">
+              <input v-model="prefs.defaultEditor" type="radio" name="default-editor" :value="editor.id" />
+              <span>Default</span>
+            </label>
+            <label class="editor-field editor-name">Name<input v-model="editor.name" maxlength="40" required /></label>
+            <label class="editor-field editor-url">
+              Link
+              <input v-model="editor.url" spellcheck="false" autocomplete="off" :aria-invalid="!!editorUrlProblem(editor.url)" />
+              <small v-if="editorUrlProblem(editor.url)" class="editor-problem">{{ editorUrlProblem(editor.url) }}</small>
+            </label>
+            <button type="button" class="btn-icon danger" :aria-label="'Remove ' + editor.name" :title="'Remove ' + editor.name" @click="removeEditor(editor.id)"><PhTrash :size="15" /></button>
+          </div>
+        </div>
+        <p v-else class="editor-empty">No editors yet. Add one below.</p>
+        <div class="editor-add">
+          <h3>Add an editor</h3>
+          <div class="editor-presets">
+            <button v-for="preset in unusedEditorPresets" :key="preset.id" type="button" class="btn" @click="addEditor(preset)"><PhPlus :size="13" weight="bold" aria-hidden="true" />{{ preset.name }}</button>
+            <button type="button" class="btn" @click="addEditor()"><PhPlus :size="13" weight="bold" aria-hidden="true" />Custom</button>
+          </div>
+        </div>
+        <p class="settings-hint">Editors are saved in this browser.</p>
       </section>
 
       <section
