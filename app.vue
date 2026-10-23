@@ -16,6 +16,7 @@ import {
   PhGear,
   PhGitBranch,
   PhGitPullRequest,
+  PhKanban,
   PhLink,
   PhListChecks,
   PhMagnifyingGlass,
@@ -432,14 +433,12 @@ const foreignDrag = computed(() => !!dragSourceBoardId.value && dragSourceBoardI
 const loading = ref(true)
 const error = ref<string | null>(null)
 const searchQuery = ref('')
-const releasesOpen = ref(false)
+/** The full-screen view under the top bar: the board's cards, releases or linked code. */
+type AppView = 'cards' | 'releases' | 'code'
+const view = ref<AppView>('cards')
 const releaseDropTarget = ref<string | null>(null)
-const codeOpen = ref(false)
 /** Linked folders on this board with uncommitted or unpushed work */
 const codeAttention = ref(0)
-// Only one top panel at a time, however it was opened.
-watch(releasesOpen, (open) => { if (open) codeOpen.value = false })
-watch(codeOpen, (open) => { if (open) releasesOpen.value = false })
 // Seeded from the server's list during SSR and sent in the payload, so the
 // first client render matches the server even when types are customised.
 const workTypes = useState<KindDef[]>('work-types', () => cardKinds())
@@ -669,19 +668,16 @@ function releaseTitleForCard(card: Card): string | null {
 
 const releasesPanel = ref<InstanceType<typeof ReleasesPanel> | null>(null)
 
-function toggleReleasesPanel() {
-  releasesOpen.value = !releasesOpen.value
-}
-
-function toggleCodePanel() {
-  codeOpen.value = !codeOpen.value
+function showView(next: AppView) {
+  cancelViewHover()
+  view.value = next
 }
 
 async function addRelease(boardScope: string | null = null) {
   try {
     await api('/api/releases', { method: 'POST', body: JSON.stringify({ boardScope }) })
     await refreshBoard()
-    releasesOpen.value = true
+    view.value = 'releases'
   } catch (err) { fail(err) }
 }
 
@@ -722,7 +718,7 @@ async function setReleaseDone(releaseId: string, done: boolean, completeCards: b
 
 /** Mark-done from outside the panel (command palette): open the panel and its confirm. */
 async function confirmReleaseDone(releaseId: string) {
-  releasesOpen.value = true
+  view.value = 'releases'
   await nextTick()
   releasesPanel.value?.confirmDone(releaseId)
 }
@@ -1236,8 +1232,30 @@ function onPillDragOver(event: DragEvent, id: string) {
   pillHoverTimer = setTimeout(() => switchBoard(id), 350)
 }
 
+/** Holding a dragged card over the Releases tab opens it, so the card can go into a folder. */
+const viewHover = ref<AppView | null>(null)
+let viewHoverTimer: ReturnType<typeof setTimeout> | null = null
+
+function cancelViewHover() {
+  if (viewHoverTimer !== null) clearTimeout(viewHoverTimer)
+  viewHoverTimer = null
+  viewHover.value = null
+}
+
+function onViewTabDragOver(event: DragEvent, next: AppView) {
+  if (!dragged.value) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  stopEdgeScroll()
+  if (view.value === next || viewHover.value === next) return
+  cancelViewHover()
+  viewHover.value = next
+  viewHoverTimer = setTimeout(() => showView(next), 350)
+}
+
 function finishDrag() {
   cancelPillHover()
+  cancelViewHover()
   document.removeEventListener('dragover', onDocumentDragOver)
   stopEdgeScroll()
   dragged.value = null
@@ -2513,6 +2531,7 @@ async function goToCard(card: { id: string; boardId: string; columnId?: string; 
 async function goToColumn(column: SearchIndex['columns'][number]) {
   if (!(await goToBoard(column.boardId))) return
   searchQuery.value = ''
+  view.value = 'cards'
   await nextTick()
   boardEl.value?.querySelector(`.column[data-id="${CSS.escape(column.id)}"]`)
     ?.scrollIntoView({ behavior: motionFactor.value ? 'smooth' : 'auto', inline: 'center', block: 'nearest' })
@@ -2536,12 +2555,13 @@ const paletteItems = computed<PaletteItem[]>(() => {
   }
   action({ id: 'new-column', title: 'New column', icon: PhColumns, keywords: 'add create list', run: () => openColumnDialog(null) })
   action({ id: 'new-board', title: 'New board', icon: PhSquaresFour, keywords: 'add create', run: () => openSettings('boards') })
-  action({ id: 'releases', title: releasesOpen.value ? 'Hide releases' : 'Show releases', icon: PhRocketLaunch, keywords: 'release folders deploy', run: toggleReleasesPanel })
+  if (view.value !== 'cards') action({ id: 'cards', title: 'Show cards', icon: PhKanban, keywords: 'board columns view', run: () => showView('cards') })
+  if (view.value !== 'releases') action({ id: 'releases', title: 'Show releases', icon: PhRocketLaunch, keywords: 'release folders deploy view', run: () => showView('releases') })
   action({ id: 'new-release', title: 'New release', subtitle: 'For all boards', icon: PhRocketLaunch, keywords: 'add create release deploy', run: () => addRelease(null) })
   for (const rel of board.value.releases.filter((entry) => !entry.doneAt)) {
     action({ id: `release-done-${rel.id}`, title: `Mark ${rel.title} done`, icon: PhCheck, keywords: 'release shipped complete finish', queryOnly: true, run: () => confirmReleaseDone(rel.id) })
   }
-  action({ id: 'code', title: codeOpen.value ? 'Hide code changes' : 'Show code changes', icon: PhGitBranch, keywords: 'git repo commit push discard local changes folder', run: toggleCodePanel })
+  if (view.value !== 'code') action({ id: 'code', title: 'Show code changes', icon: PhGitBranch, keywords: 'git repo commit push discard local changes folder view', run: () => showView('code') })
   action({ id: 'archive', title: 'Open archive', icon: PhArchive, keywords: 'archived restore done old', run: openArchiveFromMenu })
   action({ id: 'theme', title: resolvedTheme.value === 'dark' ? 'Switch to day mode' : 'Switch to night mode', icon: resolvedTheme.value === 'dark' ? PhSun : PhMoon, keywords: 'theme light dark day night appearance', run: toggleTheme })
   action({ id: 'settings', title: 'Settings', icon: PhGear, keywords: 'appearance theme density motion surfaces preferences', run: () => openSettings('appearance') })
@@ -2902,22 +2922,36 @@ onBeforeUnmount(() => {
         <span class="palette-trigger-text">Search or jump to…</span>
         <kbd aria-hidden="true">{{ paletteShortcut }}</kbd>
       </button>
-      <button
-        class="btn"
-        :class="{ 'btn-active': releasesOpen }"
-        :aria-expanded="releasesOpen"
-        aria-controls="releases-panel"
-        @click="toggleReleasesPanel"
-      ><PhRocketLaunch :size="15" aria-hidden="true" />Releases</button>
-      <button
-        class="btn btn-badged"
-        :class="{ 'btn-active': codeOpen }"
-        :aria-expanded="codeOpen"
-        aria-controls="code-panel"
-        :title="codeAttention ? codeAttention + ' linked folder' + (codeAttention === 1 ? '' : 's') + ' with changes to commit or push' : 'Linked code folders'"
-        @click="toggleCodePanel"
-      ><PhGitBranch :size="15" aria-hidden="true" />Code<span v-if="codeAttention" class="btn-badge">{{ codeAttention }}</span></button>
-      <button class="btn btn-primary" :disabled="loading || !!switchingBoardId" @click="openColumnDialog(null)"><PhPlus :size="15" weight="bold" aria-hidden="true" />Column</button>
+      <div class="segmented view-switch" role="tablist" aria-label="View">
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="view === 'cards'"
+          aria-controls="board-view"
+          title="Board cards"
+          @click="showView('cards')"
+        ><PhKanban :size="15" aria-hidden="true" /><span class="view-switch-label">Cards</span></button>
+        <button
+          type="button"
+          role="tab"
+          :class="{ 'drag-hover': viewHover === 'releases' }"
+          :aria-selected="view === 'releases'"
+          aria-controls="releases-panel"
+          :title="dragged ? 'Hold a card here to open Releases' : 'Releases'"
+          @click="showView('releases')"
+          @dragover="onViewTabDragOver($event, 'releases')"
+          @dragleave="!($event.currentTarget as HTMLElement).contains($event.relatedTarget as Node | null) && cancelViewHover()"
+        ><PhRocketLaunch :size="15" aria-hidden="true" /><span class="view-switch-label">Releases</span></button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="view === 'code'"
+          aria-controls="code-panel"
+          :title="codeAttention ? codeAttention + ' linked folder' + (codeAttention === 1 ? '' : 's') + ' with changes to commit or push' : 'Linked code folders'"
+          @click="showView('code')"
+        ><PhGitBranch :size="15" aria-hidden="true" /><span class="view-switch-label">Code</span><span v-if="codeAttention" class="btn-badge">{{ codeAttention }}</span></button>
+      </div>
+      <button v-if="view === 'cards'" class="btn btn-primary" :disabled="loading || !!switchingBoardId" @click="openColumnDialog(null)"><PhPlus :size="15" weight="bold" aria-hidden="true" />Column</button>
       <button
         type="button"
         class="btn-icon theme-toggle"
@@ -2948,12 +2982,12 @@ onBeforeUnmount(() => {
     v-if="!loading"
     :board-id="activeBoardId"
     :board-name="activeBoard?.name ?? 'this board'"
-    :open="codeOpen"
+    :open="view === 'code'"
     @attention="codeAttention = $event"
   />
 
   <ReleasesPanel
-    v-if="releasesOpen && !loading"
+    v-if="view === 'releases' && !loading"
     ref="releasesPanel"
     :releases="board.releases"
     :boards="boards"
@@ -2980,7 +3014,16 @@ onBeforeUnmount(() => {
     </div>
   </main>
 
-  <div v-else class="board-viewport">
+  <!-- Moved off-screen rather than unmounted while another view shows, so a card
+       being dragged into Releases keeps its drag source alive. -->
+  <div
+    v-else
+    id="board-view"
+    class="board-viewport"
+    :class="{ 'board-viewport-away': view !== 'cards' }"
+    :aria-hidden="view !== 'cards' || undefined"
+    :inert="(view !== 'cards' && !dragged) || undefined"
+  >
   <main
     ref="boardEl"
     class="board"
@@ -3074,7 +3117,7 @@ onBeforeUnmount(() => {
                 type="button"
                 class="card-release"
                 :title="'In release: ' + releaseTitleForCard(card)"
-                @click.stop="releasesOpen = true"
+                @click.stop="showView('releases')"
               >{{ releaseTitleForCard(card) }}</button>
               <span
                 v-if="showCardDue(card)"
