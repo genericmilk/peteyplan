@@ -13,6 +13,7 @@ import {
 } from '@phosphor-icons/vue'
 import { kindDef, normalizeKind, normalizeProgress } from '~/shared/progress'
 import { requestDialogClose, vModal } from '~/composables/useModal'
+import { menuPosition, vDismiss } from '~/composables/useDropdown'
 
 export interface ReleaseCardView {
   id: string
@@ -65,7 +66,7 @@ const emit = defineEmits<{
 }>()
 
 const tab = ref<'open' | 'done'>('open')
-const newMenuOpen = ref(false)
+const newMenu = ref<{ top: number; right: number } | null>(null)
 const expanded = ref(new Set<string>())
 
 const openReleases = computed(() => props.releases.filter((rel) => !rel.doneAt))
@@ -125,8 +126,12 @@ function toggleExpanded(id: string) {
   expanded.value = next
 }
 
+function toggleNewMenu(event: MouseEvent) {
+  newMenu.value = newMenu.value ? null : menuPosition(event.currentTarget as Element, 'right') as { top: number; right: number }
+}
+
 function create(scope: string | null) {
-  newMenuOpen.value = false
+  newMenu.value = null
   tab.value = 'open'
   emit('create', scope)
 }
@@ -190,13 +195,18 @@ defineExpose({ confirmDone, showTab: (next: 'open' | 'done') => { tab.value = ne
         <button
           class="btn btn-primary"
           type="button"
-          :aria-expanded="newMenuOpen"
+          :aria-expanded="!!newMenu"
           aria-haspopup="menu"
-          @click="newMenuOpen = !newMenuOpen"
+          @click="toggleNewMenu"
         ><PhPlus :size="15" weight="bold" aria-hidden="true" />New release<PhCaretDown :size="12" weight="bold" aria-hidden="true" /></button>
-        <template v-if="newMenuOpen">
-          <div class="release-new-backdrop" @click="newMenuOpen = false"></div>
-          <div class="column-menu release-new-menu" role="menu" @keydown.esc="newMenuOpen = false">
+        <Teleport v-if="newMenu" to="body">
+          <div class="release-new-backdrop" @click="newMenu = null"></div>
+          <div
+            v-dismiss="() => { newMenu = null }"
+            class="column-menu release-new-menu"
+            role="menu"
+            :style="{ top: newMenu.top + 'px', right: newMenu.right + 'px' }"
+          >
             <button type="button" role="menuitem" @click="create(null)">
               <PhGlobeSimple :size="15" />
               <span>For all boards<small>Cards from any board can join</small></span>
@@ -206,7 +216,7 @@ defineExpose({ confirmDone, showTab: (next: 'open' | 'done') => { tab.value = ne
               <span>Only {{ activeBoard.name }}<small>Just this board's cards</small></span>
             </button>
           </div>
-        </template>
+        </Teleport>
       </div>
     </div>
 

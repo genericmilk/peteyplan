@@ -66,6 +66,7 @@ import { PULL_REQUESTS_MAX, normalizePullRequests, parsePullRequest } from '~/sh
 import type { PaletteItem } from '~/components/CommandPalette.vue'
 import ReleasesPanel, { type ReleaseCardView } from '~/components/ReleasesPanel.vue'
 import GitPanel from '~/components/GitPanel.vue'
+import { menuPosition, vDismiss } from '~/composables/useDropdown'
 import ConfirmDialog from '~/components/ConfirmDialog.vue'
 import { confirmDialog, requestDialogClose, resetDialogSizes, vModal } from '~/composables/useModal'
 import { fireConfetti } from '~/composables/useConfetti'
@@ -669,11 +670,21 @@ function releaseTitleForCard(card: Card): string | null {
 const releasesPanel = ref<InstanceType<typeof ReleasesPanel> | null>(null)
 
 /** Top-bar + menu */
-const newMenuOpen = ref(false)
+const newMenu = ref<{ top: number; left: number } | null>(null)
+const gitPanel = ref<InstanceType<typeof GitPanel> | null>(null)
 
-function newFromMenu(kind: 'card' | 'column' | 'board') {
-  newMenuOpen.value = false
+function toggleNewMenu(event: MouseEvent) {
+  newMenu.value = newMenu.value ? null : menuPosition(event.currentTarget as Element, 'left') as { top: number; left: number }
+}
+
+async function newFromMenu(kind: 'card' | 'column' | 'board' | 'repo') {
+  newMenu.value = null
   if (kind === 'board') return openSettings('boards')
+  if (kind === 'repo') {
+    view.value = 'code'
+    await nextTick()
+    return gitPanel.value?.openBrowser()
+  }
   // Cards and columns land on the board, so show it.
   view.value = 'cards'
   const first = board.value.columns[0]
@@ -2934,16 +2945,21 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="btn btn-primary btn-square"
-          title="New card, column or board"
-          aria-label="New card, column or board"
+          title="New card, column or board, or link a repo"
+          aria-label="New card, column or board, or link a repo"
           aria-haspopup="menu"
-          :aria-expanded="newMenuOpen"
+          :aria-expanded="!!newMenu"
           :disabled="loading || !!switchingBoardId"
-          @click="newMenuOpen = !newMenuOpen"
+          @click="toggleNewMenu"
         ><PhPlus :size="16" weight="bold" aria-hidden="true" /></button>
-        <template v-if="newMenuOpen">
-          <div class="release-new-backdrop" @click="newMenuOpen = false"></div>
-          <div class="column-menu release-new-menu topbar-new-menu" role="menu" @keydown.esc="newMenuOpen = false">
+        <Teleport v-if="newMenu" to="body">
+          <div class="release-new-backdrop" @click="newMenu = null"></div>
+          <div
+            v-dismiss="() => { newMenu = null }"
+            class="column-menu release-new-menu"
+            role="menu"
+            :style="{ top: newMenu.top + 'px', left: newMenu.left + 'px' }"
+          >
             <button type="button" role="menuitem" :disabled="!board.columns.length" @click="newFromMenu('card')">
               <PhCards :size="15" />
               <span>Card<small>{{ board.columns[0] ? 'In ' + board.columns[0].title : 'Add a column first' }}</small></span>
@@ -2956,8 +2972,13 @@ onBeforeUnmount(() => {
               <PhSquaresFour :size="15" />
               <span>Board<small>Start a fresh board</small></span>
             </button>
+            <hr />
+            <button type="button" role="menuitem" @click="newFromMenu('repo')">
+              <PhGitBranch :size="15" />
+              <span>Link repo<small>Track a local folder's changes</small></span>
+            </button>
           </div>
-        </template>
+        </Teleport>
       </div>
       <button type="button" class="topbar-search palette-trigger" :aria-keyshortcuts="paletteShortcut === '⌘K' ? 'Meta+K' : 'Control+K'" @click="openPalette">
         <PhMagnifyingGlass :size="15" aria-hidden="true" />
@@ -3021,6 +3042,7 @@ onBeforeUnmount(() => {
 
   <GitPanel
     v-if="!loading"
+    ref="gitPanel"
     :board-id="activeBoardId"
     :board-name="activeBoard?.name ?? 'this board'"
     :open="view === 'code'"
@@ -3984,6 +4006,7 @@ onBeforeUnmount(() => {
   <div
     v-if="columnMenu"
     ref="columnMenuEl"
+    v-dismiss="closeColumnMenu"
     class="column-menu"
     :style="{ top: columnMenu.top + 'px', right: columnMenu.right + 'px' }"
   >
@@ -4003,11 +4026,11 @@ onBeforeUnmount(() => {
   <div
     v-if="boardMenu"
     ref="boardMenuEl"
+    v-dismiss="closeBoardMenu"
     class="column-menu"
     :style="{ top: boardMenu.top + 'px', right: boardMenu.right + 'px' }"
   >
     <button @click="openSettings('appearance')"><PhGear :size="15" />Settings</button>
-    <button @click="openSettings('boards')"><PhSquaresFour :size="15" />Manage boards</button>
     <button @click="openArchiveFromMenu"><PhArchive :size="15" />Archive</button>
   </div>
 
