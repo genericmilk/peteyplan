@@ -276,6 +276,25 @@ export function gitSwitch(root: string, branch: string, mode: 'local' | 'create'
   })
 }
 
+/**
+ * Catch up with the upstream branch. Fast-forward only: it never merges or
+ * rebases, so it can't leave the working copy mid-conflict.
+ */
+export function gitPull(root: string): Promise<void> {
+  return serial(root, async () => {
+    const upstream = (await run(root, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']).catch(() => '')).trim()
+    if (!upstream) throw new GitError('This branch has no upstream to pull from yet. Push it first.')
+    try {
+      await run(root, ['pull', '--ff-only', '--no-rebase'], PUSH_TIMEOUT_MS)
+    } catch (err) {
+      if (err instanceof GitError && /fast-forward|diverg/i.test(err.message)) {
+        throw new GitError(`Your branch and ${upstream} have both moved on, so they can't be lined up automatically. Merge or rebase them in a terminal.`, 409)
+      }
+      throw err
+    }
+  })
+}
+
 /** Refresh remote branches and ahead/behind counts. */
 export function gitFetch(root: string): Promise<void> {
   return serial(root, async () => { await run(root, ['fetch', '--all', '--prune'], PUSH_TIMEOUT_MS) })

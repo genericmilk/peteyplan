@@ -3148,6 +3148,19 @@ dialog.confirm-dialog { width: min(420px, calc(100vw - 32px)); }
 .code-repo-meta .code-branch { font-size: 12px; padding: 4px 9px; max-width: 100%; min-width: 0; }
 .code-branch-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .code-sync { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; white-space: nowrap; }
+button.code-pull {
+  appearance: none;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  cursor: pointer;
+}
+button.code-pull:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+button.code-pull:disabled { cursor: default; opacity: 0.6; }
 .code-chip {
   display: inline-flex;
   align-items: center;

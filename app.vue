@@ -81,6 +81,7 @@ import {
 import {
   DENSITY_OPTIONS,
   ELASTICITY_OPTIONS,
+  SCROLL_SWITCH_OPTIONS,
   MOTION_OPTIONS,
   SURFACE_OPTIONS,
   THEME_OPTIONS,
@@ -2760,7 +2761,8 @@ function onBoardWheel(event: WheelEvent) {
 
   const index = boards.value.findIndex((entry) => entry.id === activeBoardId.value)
   const neighbour = index < 0 ? undefined : boards.value[index + direction]
-  if (!neighbour || switchingBoardId.value) return
+  // With scroll-to-switch off, the edge is just the end of the board.
+  if (!neighbour || switchingBoardId.value || prefs.value.scrollSwitch === 'off') return
   event.preventDefault()
   // At the board's edge mid-pan — hold while that scroll (or its momentum) carries on,
   // so only a fresh scroll after a pause pulls in the next board.
@@ -3491,6 +3493,22 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="setting-row">
+          <div class="setting-label">
+            <h3>Scroll to switch boards</h3>
+            <p>Scrolling past the first or last column moves to the previous or next board. Turn it off to keep the wheel on this board.</p>
+          </div>
+          <div class="segmented" role="radiogroup" aria-label="Scroll to switch boards">
+            <button
+              v-for="option in SCROLL_SWITCH_OPTIONS"
+              :key="option.id"
+              type="button"
+              role="radio"
+              :aria-checked="prefs.scrollSwitch === option.id"
+              @click="prefs.scrollSwitch = option.id"
+            >{{ option.label }}</button>
+          </div>
+        </div>
+        <div v-if="prefs.scrollSwitch === 'on'" class="setting-row">
           <div class="setting-label">
             <h3>Edge elasticity</h3>
             <p>Scrolling past a board's edge stretches it and pulls in the next board. With None, scrolling past the edge switches boards straight away.</p>
