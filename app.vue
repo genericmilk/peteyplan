@@ -16,6 +16,7 @@ import {
   PhGear,
   PhGitBranch,
   PhGitPullRequest,
+  PhGlobeSimple,
   PhKanban,
   PhLink,
   PhListChecks,
@@ -673,8 +674,22 @@ const releasesPanel = ref<InstanceType<typeof ReleasesPanel> | null>(null)
 const newMenu = ref<{ top: number; left: number } | null>(null)
 const gitPanel = ref<InstanceType<typeof GitPanel> | null>(null)
 
+/** What + makes depends on the view: board items, a release, or a linked repo. */
+const newButtonLabel = computed(() => ({
+  cards: 'New card, column or board',
+  releases: 'New release',
+  code: 'Link repo',
+})[view.value])
+
 function toggleNewMenu(event: MouseEvent) {
+  // Code has a single thing to add, so skip the menu.
+  if (view.value === 'code') return void newFromMenu('repo')
   newMenu.value = newMenu.value ? null : menuPosition(event.currentTarget as Element, 'left') as { top: number; left: number }
+}
+
+function newRelease(boardScope: string | null) {
+  newMenu.value = null
+  void addRelease(boardScope)
 }
 
 async function newFromMenu(kind: 'card' | 'column' | 'board' | 'repo') {
@@ -693,6 +708,7 @@ async function newFromMenu(kind: 'card' | 'column' | 'board' | 'repo') {
 }
 
 function showView(next: AppView) {
+  newMenu.value = null
   cancelViewHover()
   view.value = next
 }
@@ -2945,10 +2961,10 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="btn btn-primary btn-square"
-          title="New card, column or board, or link a repo"
-          aria-label="New card, column or board, or link a repo"
-          aria-haspopup="menu"
-          :aria-expanded="!!newMenu"
+          :title="newButtonLabel"
+          :aria-label="newButtonLabel"
+          :aria-haspopup="view === 'code' ? 'dialog' : 'menu'"
+          :aria-expanded="view === 'code' ? undefined : !!newMenu"
           :disabled="loading || !!switchingBoardId"
           @click="toggleNewMenu"
         ><PhPlus :size="16" weight="bold" aria-hidden="true" /></button>
@@ -2960,23 +2976,30 @@ onBeforeUnmount(() => {
             role="menu"
             :style="{ top: newMenu.top + 'px', left: newMenu.left + 'px' }"
           >
-            <button type="button" role="menuitem" :disabled="!board.columns.length" @click="newFromMenu('card')">
-              <PhCards :size="15" />
-              <span>Card<small>{{ board.columns[0] ? 'In ' + board.columns[0].title : 'Add a column first' }}</small></span>
-            </button>
-            <button type="button" role="menuitem" @click="newFromMenu('column')">
-              <PhColumns :size="15" />
-              <span>Column<small>On {{ activeBoard?.name ?? 'this board' }}</small></span>
-            </button>
-            <button type="button" role="menuitem" @click="newFromMenu('board')">
-              <PhSquaresFour :size="15" />
-              <span>Board<small>Start a fresh board</small></span>
-            </button>
-            <hr />
-            <button type="button" role="menuitem" @click="newFromMenu('repo')">
-              <PhGitBranch :size="15" />
-              <span>Link repo<small>Track a local folder's changes</small></span>
-            </button>
+            <template v-if="view === 'releases'">
+              <button type="button" role="menuitem" @click="newRelease(null)">
+                <PhGlobeSimple :size="15" />
+                <span>Release for all boards<small>Cards from any board can join</small></span>
+              </button>
+              <button v-if="activeBoard" type="button" role="menuitem" @click="newRelease(activeBoard.id)">
+                <span class="release-new-emoji" aria-hidden="true">{{ activeBoard.emoji }}</span>
+                <span>Release for {{ activeBoard.name }}<small>Just this board's cards</small></span>
+              </button>
+            </template>
+            <template v-else>
+              <button type="button" role="menuitem" :disabled="!board.columns.length" @click="newFromMenu('card')">
+                <PhCards :size="15" />
+                <span>Card<small>{{ board.columns[0] ? 'In ' + board.columns[0].title : 'Add a column first' }}</small></span>
+              </button>
+              <button type="button" role="menuitem" @click="newFromMenu('column')">
+                <PhColumns :size="15" />
+                <span>Column<small>On {{ activeBoard?.name ?? 'this board' }}</small></span>
+              </button>
+              <button type="button" role="menuitem" @click="newFromMenu('board')">
+                <PhSquaresFour :size="15" />
+                <span>Board<small>Start a fresh board</small></span>
+              </button>
+            </template>
           </div>
         </Teleport>
       </div>

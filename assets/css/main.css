@@ -926,6 +926,17 @@ button.release-ticket {
   cursor: pointer;
 }
 .checkbox-row input { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; }
+/* Beats the stacked `.dialog-form label` layout, so the box sits beside its text. */
+.dialog-form label.checkbox-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text);
+  margin-bottom: 0;
+}
+.dialog-form label.checkbox-row input { flex: 0 0 auto; width: 15px; padding: 0; }
 
 /* Top-bar count badge */
 .btn-badged { position: relative; }
@@ -1082,7 +1093,7 @@ button.code-branch:disabled { cursor: default; opacity: 0.7; }
 }
 .code-files li { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
 .code-files.muted { opacity: 0.5; }
-.code-files-dialog { max-height: 180px; }
+.code-files-dialog { max-height: 180px; margin: 12px 0; }
 .code-file-status {
   flex: 0 0 auto;
   width: 16px;
@@ -2989,6 +3000,8 @@ dialog:not(.command-palette) > .dialog-form {
 /* A column, so the action bar can sit on the bottom edge however tall the dialog is resized. */
 dialog:not(.command-palette) > form,
 dialog:not(.command-palette) > .dialog-form { display: flex; flex-direction: column; }
+/* The bar's auto top margin is zero when there's no spare height, so keep a gap above it. */
+dialog:not(.command-palette) > :is(form, .dialog-form) > :has(+ .dialog-actions) { margin-bottom: 16px; }
 .dialog-actions {
   position: sticky;
   bottom: 0;
