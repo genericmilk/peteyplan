@@ -182,7 +182,7 @@ defineExpose({ confirmDone, showTab: (next: 'open' | 'done') => { tab.value = ne
           </div>
         </div>
         <p class="releases-panel-hint">
-          <template v-if="tab === 'open'">Drag cards into a folder. Preprod update {{ preprodHint }} · Prod go-live {{ prodHint }}</template>
+          <template v-if="tab === 'open'">Hold a dragged card over the Releases tab to bring it here, then drop it on a folder. Preprod update {{ preprodHint }} · Prod go-live {{ prodHint }}</template>
           <template v-else>Shipped releases, newest first. Reopen one to change its cards.</template>
         </p>
       </div>
